@@ -1,0 +1,25 @@
+# Build outputs
+**/Debug/
+**/Release/
+
+# Eclipse / CubeIDE project-specific
+.settings/
+.metadata/
+.mxproject
+
+# VS Code
+.vscode/
+
+# Object files
+*.o
+*.d
+*.elf
+*.bin
+*.hex
+*.map
+*.list
+
+# Analysis / diagnostic notes (generated during debug sessions)
+ANALYSE_PROJET_FIRST.md
+DIAGNOSTIC_HARD_FAULT.md
+INTEGRATION_LVGL.md
