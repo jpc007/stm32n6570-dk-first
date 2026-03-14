@@ -309,9 +309,41 @@ void PeriphCommonClock_Config(void)
   /* USER CODE END RIF_Init 1 */
   /* USER CODE BEGIN RIF_Init 2 */
 
-  /* USART2 est utilise dans AppliNonSecure — ouvrir l'acces RIFSC avant le saut NS */
+  /* ---------------------------------------------------------------
+   * Configurations NON generees par CubeMX — doivent rester ici.
+   * Survivent a la regeneration car dans USER CODE.
+   * --------------------------------------------------------------- */
+
+  /* 1) RISUP NSEC pour peripheriques AppliNonSecure
+   *    (CubeMX ne genere que des RISUP SEC pour le FSBL) */
   HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_USART2,
                                         RIF_ATTRIBUTE_NSEC | RIF_ATTRIBUTE_NPRIV);
+  HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_LTDC,
+                                        RIF_ATTRIBUTE_NSEC | RIF_ATTRIBUTE_NPRIV);
+  HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_LTDCL1,
+                                        RIF_ATTRIBUTE_NSEC | RIF_ATTRIBUTE_NPRIV);
+  HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_LTDCL2,
+                                        RIF_ATTRIBUTE_NSEC | RIF_ATTRIBUTE_NPRIV);
+
+  /* 2) RIMC master : LTDC L1 + L2 DMA avec CID=1 (NS)
+   *    (CubeMX ne genere pas de RIMC pour LTDC) */
+  {
+    RIMC_MasterConfig_t ltdc_master = {0};
+    ltdc_master.MasterCID = RIF_CID_1;
+    ltdc_master.SecPriv   = RIF_ATTRIBUTE_NSEC | RIF_ATTRIBUTE_NPRIV;
+    HAL_RIF_RIMC_ConfigMasterAttributes(RIF_MASTER_INDEX_LTDC1, &ltdc_master);
+    HAL_RIF_RIMC_ConfigMasterAttributes(RIF_MASTER_INDEX_LTDC2, &ltdc_master);
+  }
+
+  /* 3) GPIOQ — LCD_ON (PQ3) et backlight (PQ6)
+   *    (CubeMX ne genere aucun code pour GPIOQ) */
+  __HAL_RCC_GPIOQ_CLK_ENABLE();
+  HAL_GPIO_ConfigPinAttributes(GPIOQ, GPIO_PIN_3, GPIO_PIN_NSEC | GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPIOQ, GPIO_PIN_6, GPIO_PIN_NSEC | GPIO_PIN_NPRIV);
+
+  /* 4) PA15 (LTDC_R5) et PB4 (LTDC_R3) — pins JTAG ignores par CubeMX */
+  HAL_GPIO_ConfigPinAttributes(GPIOA, GPIO_PIN_15, GPIO_PIN_NSEC | GPIO_PIN_NPRIV);
+  HAL_GPIO_ConfigPinAttributes(GPIOB, GPIO_PIN_4,  GPIO_PIN_NSEC | GPIO_PIN_NPRIV);
 
   /* USER CODE END RIF_Init 2 */
 

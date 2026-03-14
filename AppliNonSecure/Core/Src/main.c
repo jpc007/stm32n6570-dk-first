@@ -190,7 +190,38 @@ int main(void)
   HAL_GPIO_Init(GPIOQ, &GPIO_InitStruct);
   HAL_GPIO_WritePin(GPIOQ, GPIO_PIN_6, GPIO_PIN_SET);   /* backlight */
 
+  /* LCD_NRST (PE1) : sortir le panneau LCD du reset */
+  GPIO_InitStruct.Pin   = LCD_NRST_Pin;
+  GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull  = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(LCD_NRST_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_WritePin(LCD_NRST_GPIO_Port, LCD_NRST_Pin, GPIO_PIN_SET);
+
   HAL_Delay(50);  /* laisser le panneau demarrer */
+
+  /* --- LTDC GPIO : pins manquants dans MX_GPIO_Init + speed fix ---- */
+  /* LCD_CLK (PB13) — CRITIQUE : pixel clock, absent du .ioc ! */
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  GPIO_InitStruct.Pin       = LCD_CLK_Pin;
+  GPIO_InitStruct.Mode      = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull      = GPIO_NOPULL;
+  GPIO_InitStruct.Speed     = GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF14_LCD;
+  HAL_GPIO_Init(LCD_CLK_GPIO_Port, &GPIO_InitStruct);
+
+  /* LCD_R0 (PG0) — absent du .ioc */
+  __HAL_RCC_GPIOG_CLK_ENABLE();
+  GPIO_InitStruct.Pin       = LCD_R0_Pin;
+  HAL_GPIO_Init(LCD_R0_GPIO_Port, &GPIO_InitStruct);
+
+  /* LCD_DE (PG13) : GPIO OUTPUT HIGH, pas AF14 (BSP DK board) */
+  GPIO_InitStruct.Pin   = LCD_DE_Pin;
+  GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull  = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(LCD_DE_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_WritePin(LCD_DE_GPIO_Port, LCD_DE_Pin, GPIO_PIN_SET);
 
   /* =================================================================
    *  TEST BAREMETAL LTDC ULTRA-MINIMAL
@@ -444,6 +475,34 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
+  /* Corriger la vitesse GPIO pour les pins LTDC (CubeMX met LOW,
+     mais le pixel clock a 26.67 MHz necessite HIGH) */
+  GPIO_InitStruct.Mode      = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull      = GPIO_NOPULL;
+  GPIO_InitStruct.Speed     = GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF14_LCD;
+  /* GPIOH : LCD_B4, LCD_B5, LCD_R4 */
+  GPIO_InitStruct.Pin = LCD_B4_Pin|LCD_B5_Pin|LCD_R4_Pin;
+  HAL_GPIO_Init(GPIOH, &GPIO_InitStruct);
+  /* GPIOD : LCD_R2, LCD_R7, LCD_R1 */
+  GPIO_InitStruct.Pin = LCD_R2_Pin|LCD_R7_Pin|LCD_R1_Pin;
+  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+  /* GPIOB : LCD_HSYNC, LCD_B2, LCD_G4, LCD_G6, LCD_G5, LCD_R3 */
+  GPIO_InitStruct.Pin = LCD_HSYNC_Pin|LCD_B2_Pin|LCD_G4_Pin|LCD_G6_Pin
+                        |LCD_G5_Pin|LCD_R3_Pin;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  /* GPIOE : LCD_VSYNC */
+  GPIO_InitStruct.Pin = LCD_VSYNC_Pin;
+  HAL_GPIO_Init(LCD_VSYNC_GPIO_Port, &GPIO_InitStruct);
+  /* GPIOG : LCD_B3, LCD_B0, LCD_G1, LCD_G0, LCd_G7, LCD_R6 (PAS LCD_DE) */
+  GPIO_InitStruct.Pin = LCD_B3_Pin|LCD_B0_Pin|LCD_G1_Pin|LCD_G0_Pin
+                        |LCd_G7_Pin|LCD_R6_Pin;
+  HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
+  /* GPIOA : LCD_G2, LCD_R5, LCD_B1, LCD_B7, LCD_B6, LCD_G3 */
+  GPIO_InitStruct.Pin = LCD_G2_Pin|LCD_R5_Pin|LCD_B1_Pin|LCD_B7_Pin
+                        |LCD_B6_Pin|LCD_G3_Pin;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
   /* LCD_NRST (PE1) : sortir le panneau LCD du reset */
   GPIO_InitStruct.Pin   = LCD_NRST_Pin;
   GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
