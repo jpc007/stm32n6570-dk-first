@@ -119,8 +119,6 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  /* Peripheral inits below are NOT needed for boot chain — disabled to
-     prevent potential hangs (SDMMC without card, USB, XSPI etc.)
   MX_ADC1_Init();
   MX_I2C1_Init();
   MX_I2C2_Init();
@@ -133,7 +131,6 @@ int main(void)
   MX_USB2_OTG_HS_HCD_Init();
   MX_XSPI1_Init();
   MX_XSPI2_Init();
-  */
   /* USER CODE BEGIN 2 */
 
   /* Jump to AppliSecure --------------------------------------------------- */
@@ -286,10 +283,6 @@ void PeriphCommonClock_Config(void)
   {
     Error_Handler();
   }
-
-  /* USER CODE BEGIN PeriphCommonClock */
-
-  /* USER CODE END PeriphCommonClock */
 }
 
 /**

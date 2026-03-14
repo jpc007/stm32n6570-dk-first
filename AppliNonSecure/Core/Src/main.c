@@ -24,6 +24,7 @@
 /* LVGL desactive pour test baremetal LTDC */
 // #include "lvgl_port.h"
 // #include "lvgl.h"
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -33,6 +34,25 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+/* =========================================================================
+ * Debug board : 5 LEDs + USART2 (PD5 TX AF7, PF6 RX AF7)
+ * ========================================================================= */
+#define DBG_LED_GREEN_PORT   GPIOD
+#define DBG_LED_GREEN_PIN    GPIO_PIN_0
+#define DBG_LED_YELLOW_PORT  GPIOE
+#define DBG_LED_YELLOW_PIN   GPIO_PIN_9
+#define DBG_LED_RED_PORT     GPIOH
+#define DBG_LED_RED_PIN      GPIO_PIN_5
+#define DBG_LED_BLUE_PORT    GPIOE
+#define DBG_LED_BLUE_PIN     GPIO_PIN_10
+#define DBG_LED_WHITE_PORT   GPIOE
+#define DBG_LED_WHITE_PIN    GPIO_PIN_13
+
+#define DBG_LED_ON(p,b)     HAL_GPIO_WritePin(p, b, GPIO_PIN_SET)
+#define DBG_LED_OFF(p,b)    HAL_GPIO_WritePin(p, b, GPIO_PIN_RESET)
+#define DBG_LED_TOGGLE(p,b) HAL_GPIO_TogglePin(p, b)
+
+#define DBG_LED_COUNT  5
 
 /* USER CODE END PD */
 
@@ -43,18 +63,83 @@
 
 /* Private variables ---------------------------------------------------------*/
 
+UART_HandleTypeDef huart2;
+
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 static void MX_GPIO_Init(void);
+static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
-
+static void DBG_Board_Init(void);
+static void DBG_Print(const char *s);
+static void DBG_PrintDec(uint32_t v);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/* --- LED table for chenillard ------------------------------------------ */
+static GPIO_TypeDef * const led_port[DBG_LED_COUNT] = {
+  DBG_LED_GREEN_PORT,
+  DBG_LED_YELLOW_PORT,
+  DBG_LED_RED_PORT,
+  DBG_LED_BLUE_PORT,
+  DBG_LED_WHITE_PORT,
+};
+static const uint16_t led_pin[DBG_LED_COUNT] = {
+  DBG_LED_GREEN_PIN,
+  DBG_LED_YELLOW_PIN,
+  DBG_LED_RED_PIN,
+  DBG_LED_BLUE_PIN,
+  DBG_LED_WHITE_PIN,
+};
+
+/* --- Debug board : GPIO (5 LEDs) init ---------------------------------- */
+static void DBG_Board_Init(void)
+{
+  GPIO_InitTypeDef gi = {0};
+
+  /* Clock enable for all LED ports */
+  __HAL_RCC_GPIOD_CLK_ENABLE();
+  __HAL_RCC_GPIOE_CLK_ENABLE();
+  __HAL_RCC_GPIOH_CLK_ENABLE();
+
+  /* Configure 5 LED pins as push-pull output */
+  gi.Mode  = GPIO_MODE_OUTPUT_PP;
+  gi.Pull  = GPIO_NOPULL;
+  gi.Speed = GPIO_SPEED_FREQ_LOW;
+  for (int i = 0; i < DBG_LED_COUNT; i++)
+  {
+    gi.Pin = led_pin[i];
+    HAL_GPIO_Init(led_port[i], &gi);
+    HAL_GPIO_WritePin(led_port[i], led_pin[i], GPIO_PIN_RESET);
+  }
+  /* USART2 init est fait par MX_USART2_UART_Init() + HAL_UART_MspInit() */
+}
+
+/* --- Minimal serial print ---------------------------------------------- */
+static void DBG_Print(const char *s)
+{
+  HAL_UART_Transmit(&huart2, (const uint8_t *)s, (uint16_t)strlen(s), 100);
+}
+
+/* --- Print decimal number ---------------------------------------------- */
+static void DBG_PrintDec(uint32_t v)
+{
+  char buf[12];
+  int pos = 0;
+  if (v == 0) { DBG_Print("0"); return; }
+  while (v) { buf[pos++] = '0' + (v % 10); v /= 10; }
+  /* reverse */
+  for (int i = 0; i < pos / 2; i++) {
+    char tmp = buf[i]; buf[i] = buf[pos-1-i]; buf[pos-1-i] = tmp;
+  }
+  buf[pos] = '\0';
+  HAL_UART_Transmit(&huart2, (const uint8_t *)buf, (uint16_t)pos, 100);
+}
 
 /* USER CODE END 0 */
 
@@ -82,25 +167,18 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-  /* LED PA3 et PE14 : init GPIO output */
-  __HAL_RCC_GPIOA_CLK_ENABLE();
-  __HAL_RCC_GPIOE_CLK_ENABLE();
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
-  GPIO_InitStruct.Pin   = GPIO_PIN_3;
-  GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull  = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-  GPIO_InitStruct.Pin   = GPIO_PIN_14;
-  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
-
-  /* LED ON = preuve qu'on atteint ce point */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_SET);
+  /* --- Debug board init (5 LEDs + USART2) --- */
+  DBG_Board_Init();
+  DBG_LED_ON(DBG_LED_GREEN_PORT, DBG_LED_GREEN_PIN);  /* VERTE = NS atteint */
+  DBG_Print("\r\n\r\n=== STM32N657 NS BOOT ===\r\n");
+  DBG_Print("Chenillard 5 LEDs + USART2 Hello World\r\n");
 
   /* --- LCD power ON + backlight ------------------------------------ */
   __HAL_RCC_GPIOQ_CLK_ENABLE();
 
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
   GPIO_InitStruct.Pin   = GPIO_PIN_3;
   GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull  = GPIO_NOPULL;
@@ -182,24 +260,43 @@ int main(void)
   /* Activer LTDC */
   ltdc->GCR |= LTDC_GCR_LTDCEN;
 
-  /* LED PE14 ON = LTDC active */
-  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_14, GPIO_PIN_SET);
+  DBG_Print("LTDC red background active\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  uint32_t led_tick = 0;
+  uint32_t chenillard_tick = 0;
+  uint32_t hello_tick      = 0;
+  uint32_t hello_count     = 0;
+  int      chenillard_idx  = 0;
+
+  /* Allumer la premiere LED du chenillard */
+  DBG_LED_ON(led_port[0], led_pin[0]);
+
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    /* Clignotement LED (~500ms) pour prouver que le CPU tourne */
-    if (HAL_GetTick() - led_tick >= 500)
+    uint32_t now = HAL_GetTick();
+
+    /* --- Chenillard : une LED a la fois, avance toutes les 150 ms --- */
+    if (now - chenillard_tick >= 150U)
     {
-      led_tick = HAL_GetTick();
-      HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_3);
-      HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_14);
+      chenillard_tick = now;
+      DBG_LED_OFF(led_port[chenillard_idx], led_pin[chenillard_idx]);
+      chenillard_idx = (chenillard_idx + 1) % DBG_LED_COUNT;
+      DBG_LED_ON(led_port[chenillard_idx], led_pin[chenillard_idx]);
+    }
+
+    /* --- Hello World toutes les 1000 ms sur USART2 --- */
+    if (now - hello_tick >= 1000U)
+    {
+      hello_tick = now;
+      hello_count++;
+      DBG_Print("Hello World #");
+      DBG_PrintDec(hello_count);
+      DBG_Print("\r\n");
     }
   }
   /* USER CODE END 3 */
@@ -224,6 +321,54 @@ void PeriphCommonClock_Config(void)
 }
 
 /**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart2.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart2.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart2.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart2, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart2, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -241,13 +386,14 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOG_CLK_ENABLE();
+  __HAL_RCC_GPIOF_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
 
   /*Configure GPIO pins : LCD_B4_Pin LCD_B5_Pin LCD_R4_Pin */
   GPIO_InitStruct.Pin = LCD_B4_Pin|LCD_B5_Pin|LCD_R4_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   GPIO_InitStruct.Alternate = GPIO_AF14_LCD;
   HAL_GPIO_Init(GPIOH, &GPIO_InitStruct);
 
@@ -255,17 +401,17 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pin = LCD_R2_Pin|LCD_R7_Pin|LCD_R1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   GPIO_InitStruct.Alternate = GPIO_AF14_LCD;
   HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
   /*Configure GPIO pins : LCD_HSYNC_Pin LCD_B2_Pin LCD_G4_Pin LCD_G6_Pin
-                           LCD_G5_Pin LCD_R3_Pin LCD_CLK_Pin */
+                           LCD_G5_Pin LCD_R3_Pin */
   GPIO_InitStruct.Pin = LCD_HSYNC_Pin|LCD_B2_Pin|LCD_G4_Pin|LCD_G6_Pin
-                          |LCD_G5_Pin|LCD_R3_Pin|LCD_CLK_Pin;
+                          |LCD_G5_Pin|LCD_R3_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   GPIO_InitStruct.Alternate = GPIO_AF14_LCD;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
@@ -273,27 +419,19 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pin = LCD_VSYNC_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   GPIO_InitStruct.Alternate = GPIO_AF14_LCD;
   HAL_GPIO_Init(LCD_VSYNC_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : LCD_B3_Pin LCD_B0_Pin LCD_G1_Pin LCD_G0_Pin
-                           LCd_G7_Pin LCD_R6_Pin LCD_R0_Pin */
+                           LCd_G7_Pin LCD_DE_Pin LCD_R6_Pin */
   GPIO_InitStruct.Pin = LCD_B3_Pin|LCD_B0_Pin|LCD_G1_Pin|LCD_G0_Pin
-                          |LCd_G7_Pin|LCD_R6_Pin|LCD_R0_Pin;
+                          |LCd_G7_Pin|LCD_DE_Pin|LCD_R6_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   GPIO_InitStruct.Alternate = GPIO_AF14_LCD;
   HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
-
-  /* LCD_DE (PG13) : sortie GPIO mise a HIGH (pas AF14 !) conformement au BSP ST */
-  GPIO_InitStruct.Pin   = LCD_DE_Pin;
-  GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull  = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-  HAL_GPIO_Init(LCD_DE_GPIO_Port, &GPIO_InitStruct);
-  HAL_GPIO_WritePin(LCD_DE_GPIO_Port, LCD_DE_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pins : LCD_G2_Pin LCD_R5_Pin LCD_B1_Pin LCD_B7_Pin
                            LCD_B6_Pin LCD_G3_Pin */
@@ -301,7 +439,7 @@ static void MX_GPIO_Init(void)
                           |LCD_B6_Pin|LCD_G3_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   GPIO_InitStruct.Alternate = GPIO_AF14_LCD;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
