@@ -133,6 +133,175 @@ int main(void)
   MX_XSPI2_Init();
   /* USER CODE BEGIN 2 */
 
+  /* ---------------------------------------------------------------
+   * SRAM3/SRAM4 : activer les horloges + sortir du shutdown
+   * DOIT etre fait ici dans le FSBL car le RCC MEMENSR ne prend
+   * effet que dans le FSBL (RCC MEM clock locks apres).
+   *
+   * On utilise des ecritures CMSIS directes dans les SET registers.
+   * MEMENSR (offset 0x0A4C) est un write-1-to-set pour MEMENR.
+   * --------------------------------------------------------------- */
+  /* Activer les horloges SRAM3 + SRAM4 via le SET register */
+  RCC->MEMENSR = RCC_MEMENR_AXISRAM3EN | RCC_MEMENR_AXISRAM4EN;  /* bits 0+1 */
+  /* Activer RAMCFG via AHB2 SET register */
+  RCC->AHB2ENSR = RCC_AHB2ENR_RAMCFGEN;  /* bit 12 */
+  __DSB();
+  /* Verification immediate */
+  {
+    volatile uint32_t check = RCC->MEMENR;
+    if (!(check & (RCC_MEMENR_AXISRAM3EN | RCC_MEMENR_AXISRAM4EN)))
+    {
+      /* Si les bits ne sont toujours pas set, forcer via ENR direct */
+      RCC->MEMENR |= (RCC_MEMENR_AXISRAM3EN | RCC_MEMENR_AXISRAM4EN);
+      __DSB();
+    }
+  }
+
+  /* Sortir SRAM3/SRAM4 du mode shutdown (SRAMSD=1 au reset) */
+  CLEAR_BIT(RAMCFG_SRAM3_AXI_S->CR, RAMCFG_CR_SRAMSD);
+  CLEAR_BIT(RAMCFG_SRAM4_AXI_S->CR, RAMCFG_CR_SRAMSD);
+  __DSB();
+
+  /* ---------------------------------------------------------------
+   * RISAF4 : ouvrir SRAM3+SRAM4 pour le LTDC DMA
+   *
+   * RISAF4 par defaut (aucune region activee) REFUSE tous les acces.
+   * Le LTDC DMA (CID1, NSEC, NPRIV) lit donc des zeros → ecran noir.
+   * On configure Region 1 (REG[0]) pour autoriser TOUS les CIDs en
+   * lecture+ecriture, sans restriction SEC/PRIV.
+   *
+   * DOIT etre fait depuis un contexte Secure (FSBL ou AppliSecure).
+   * On le fait ici pour etre certain que ca prend effet, meme si
+   * AppliSecure est charge depuis la flash externe et n'a pas notre
+   * code USER CODE.
+   * --------------------------------------------------------------- */
+  {
+    /* Activer l'horloge RISAF (AHB3) */
+    RCC->AHB3ENSR = RCC_AHB3ENR_RISAFEN;
+    __DSB();
+
+    RISAF_TypeDef *risaf4 = RISAF4_S;
+
+    /* Desactiver la region pendant la configuration */
+    risaf4->REG[0].CFGR = 0;
+    __DSB();
+
+    /* Effacer les flags d'acces illegaux */
+    risaf4->IACR = risaf4->IASR;
+
+    /* Plage : 0x24200000 – 0x242DFFFF (SRAM3 + SRAM4, 896 KB) */
+    risaf4->REG[0].STARTR = 0x24200000;
+    risaf4->REG[0].ENDR   = 0x242DFFFF;
+
+    /* Tous CIDs (0-7) autorises en lecture ET ecriture */
+    risaf4->REG[0].CIDCFGR = 0x00FF00FFU;
+
+    /* Activer : BREN seul (pas de SEC, pas de PRIV) */
+    risaf4->REG[0].CFGR = RISAF_REGx_CFGR_BREN;
+    __DSB();
+  }
+
+  /* ---------------------------------------------------------------
+   * RISAF2 / SRAM1 (framebuffer LTDC)
+   *
+   * Une region RISAF2 avec BREN + plage 0..0xFFFFF provoquait IASR!=0
+   * et acces LTDC vers 0x24010000 refuses (ecran noir alors que le CPU
+   * voyait 0xF800 dans le FB). On desactive le filtrage base region :
+   * CFGR=0, clear des flags illegaux — laisse la politique par defaut
+   * pour la SRAM1 (acces NS + LTDC NSEC OK).
+   * --------------------------------------------------------------- */
+  {
+    RISAF_TypeDef *risaf2 = RISAF2_S;
+
+    risaf2->REG[0].CFGR = 0;
+    __DSB();
+    risaf2->IACR = risaf2->IASR;
+    __DSB();
+  }
+
+  /* ---------------------------------------------------------------
+   * RIMC : configurer LTDC DMA masters (CID1, NSEC, NPRIV)
+   * LTDC Layer 1 = master index 10, Layer 2 = master index 11
+   * ATTRx: MCID[6:4]=1, MSEC[8]=0, MPRIV[9]=0, MDMA[31]=1
+   * Valeur = (1 << 4) | (1 << 31) = 0x80000010
+   * --------------------------------------------------------------- */
+  {
+    /* Activer RIFSC clock */
+    __HAL_RCC_RIFSC_CLK_ENABLE();
+    __DSB();
+
+    uint32_t rimc_val = RIFSC_RIMC_ATTRx_MCID_0   /* CID = 1 */
+                      | (1UL << 31);                /* MDMA = 1 (DMA master) */
+    RIFSC_S->RIMC_ATTRx[10] = rimc_val;  /* LTDC Layer 1 */
+    RIFSC_S->RIMC_ATTRx[11] = rimc_val;  /* LTDC Layer 2 */
+    __DSB();
+  }
+
+  /* ---------------------------------------------------------------
+   * RISUP : rendre LTDC accessible depuis NS (direct CMSIS)
+   * LTDC=bit6, LTDC_L1=bit7, LTDC_L2=bit8 dans RISC_SECCFGRx[3]
+   * --------------------------------------------------------------- */
+  {
+    /* Clear SEC bits → Non-Secure */
+    RIFSC_S->RISC_SECCFGRx[3] &= ~(0x7UL << 6);
+    /* Clear PRIV bits → Non-Privileged */
+    RIFSC_S->RISC_PRIVCFGRx[3] &= ~(0x7UL << 6);
+    __DSB();
+  }
+
+  /* ---------------------------------------------------------------
+   * GPIO NSEC : pins LCD critiques (CubeMX peut les oublier)
+   * --------------------------------------------------------------- */
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOE_CLK_ENABLE();
+  __HAL_RCC_GPIOG_CLK_ENABLE();
+  __HAL_RCC_GPIOQ_CLK_ENABLE();
+  HAL_GPIO_ConfigPinAttributes(GPIOB, GPIO_PIN_13, GPIO_PIN_NSEC | GPIO_PIN_NPRIV); /* LCD_CLK */
+  HAL_GPIO_ConfigPinAttributes(GPIOE, GPIO_PIN_1,  GPIO_PIN_NSEC | GPIO_PIN_NPRIV); /* LCD_NRST */
+  HAL_GPIO_ConfigPinAttributes(GPIOG, GPIO_PIN_0,  GPIO_PIN_NSEC | GPIO_PIN_NPRIV); /* LCD_R0 */
+  HAL_GPIO_ConfigPinAttributes(GPIOQ, GPIO_PIN_3,  GPIO_PIN_NSEC | GPIO_PIN_NPRIV); /* LCD_ON */
+  HAL_GPIO_ConfigPinAttributes(GPIOQ, GPIO_PIN_6,  GPIO_PIN_NSEC | GPIO_PIN_NPRIV); /* LCD_BL */
+
+  /* ---------------------------------------------------------------
+   * LTDC clock : configurer IC16 pixel clock + APB5 LTDC depuis FSBL
+   *
+   * Ces registres RCC sont Secure-only. Si AppliSecure (flash) ne
+   * les configure pas, le LTDC n'a pas de clock → ecran mort.
+   * On les configure ici dans le FSBL par securite.
+   * --------------------------------------------------------------- */
+  {
+    /* IC16 = PLL1 (1200 MHz) / 45 = 26.67 MHz pixel clock */
+    MODIFY_REG(RCC->IC16CFGR,
+               RCC_IC16CFGR_IC16SEL | RCC_IC16CFGR_IC16INT,
+               (0U  << RCC_IC16CFGR_IC16SEL_Pos) |
+               (44U << RCC_IC16CFGR_IC16INT_Pos));
+    RCC->DIVENSR = RCC_DIVENSR_IC16ENS;
+    __DSB();
+    /* Attendre stabilisation IC16 */
+    for (volatile int w = 0; w < 10000; w++) {}
+
+    /* LTDC kernel clock = IC16 */
+    MODIFY_REG(RCC->CCIPR4, RCC_CCIPR4_LTDCSEL, RCC_CCIPR4_LTDCSEL_1);
+
+    /* LTDC peripheral clock (APB5) */
+    RCC->APB5ENSR = RCC_APB5ENR_LTDCEN;
+    __DSB();
+
+    /* LTDC reset (proper init) */
+    RCC->APB5RSTSR = RCC_APB5RSTR_LTDCRST;
+    __DSB();
+    for (volatile int w = 0; w < 100; w++) {}
+    RCC->APB5RSTCR = RCC_APB5RSTR_LTDCRST;
+    __DSB();
+
+    /* Rendre les ressources accessibles depuis NS via PUBCFGR */
+    SET_BIT(RCC->PUBCFGR5, RCC_PUBCFGR5_AXISRAM3PUB | RCC_PUBCFGR5_AXISRAM4PUB);
+    SET_BIT(RCC->PUBCFGR2, RCC_PUBCFGR2_IC16PUB);
+    SET_BIT(RCC->PUBCFGR3, RCC_PUBCFGR3_PERPUB);
+    SET_BIT(RCC->PUBCFGR4, RCC_PUBCFGR4_APB5PUB);
+    __DSB();
+  }
+
   /* Jump to AppliSecure --------------------------------------------------- */
   {
     /* AppliSecure vector table sits at the beginning of its ROM region */

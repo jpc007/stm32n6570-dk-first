@@ -43,6 +43,11 @@ extern "C" {
 
 /* Exported constants --------------------------------------------------------*/
 /* USER CODE BEGIN EC */
+/**
+ * 1 = firmware de test LTDC uniquement (pas LVGL), sequences couleurs sur UART.
+ * 0 = application LVGL normale.
+ */
+#define APP_LTDC_VISUAL_TEST  1
 
 /* USER CODE END EC */
 

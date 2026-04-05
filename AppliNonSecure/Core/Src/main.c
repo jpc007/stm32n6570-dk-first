@@ -21,9 +21,13 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-/* LVGL desactive pour test baremetal LTDC */
-// #include "lvgl_port.h"
-// #include "lvgl.h"
+#include "framebuffer_ns.h"
+#include "ltdc_visual_test.h"
+#include "lv_port_disp_ltdc.h"
+#if !APP_LTDC_VISUAL_TEST
+#include "lvgl_port.h"
+#include "lvgl.h"
+#endif
 #include <string.h>
 /* USER CODE END Includes */
 
@@ -151,14 +155,29 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
+  /* ==== EARLY DIAG : allumer LED VERTE via registres CMSIS bruts ==== */
+  /* PD0 = LED VERTE, avant tout HAL_Init */
+  RCC->AHB4ENR |= RCC_AHB4ENR_GPIODEN;  /* horloge GPIOD */
+  __DSB();
+  GPIOD_NS->MODER = (GPIOD_NS->MODER & ~(3UL << (0*2))) | (1UL << (0*2)); /* PD0 output */
+  GPIOD_NS->BSRR = (1UL << 0);  /* PD0 HIGH = LED VERTE ON => "j'ai atteint main" */
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
+#if APP_LTDC_VISUAL_TEST
+#if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
+  /* Diag LTDC : sans D-cache pour eliminer toute incoherence cache/AXI sur SRAM3. */
+  SCB_DisableDCache();
+#endif
+#endif
+  /* LED JAUNE = HAL_Init() passe */
+  RCC->AHB4ENR |= RCC_AHB4ENR_GPIOEEN;
+  __DSB();
+  GPIOE_NS->MODER = (GPIOE_NS->MODER & ~(3UL << (9*2))) | (1UL << (9*2));
+  GPIOE_NS->BSRR = (1UL << 9);  /* PE9 = JAUNE ON */
   /* USER CODE END Init */
 
   /* USER CODE BEGIN SysInit */
@@ -173,9 +192,10 @@ int main(void)
   DBG_Board_Init();
   DBG_LED_ON(DBG_LED_GREEN_PORT, DBG_LED_GREEN_PIN);  /* VERTE = NS atteint */
   DBG_Print("\r\n\r\n=== STM32N657 NS BOOT ===\r\n");
-  DBG_Print("Chenillard 5 LEDs + USART2 Hello World\r\n");
+  DBG_Print("[1] HAL+GPIO+UART OK\r\n");
 
   /* --- LCD power ON + backlight ------------------------------------ */
+  DBG_Print("[2] LCD power...\r\n");
   __HAL_RCC_GPIOQ_CLK_ENABLE();
 
   GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -190,15 +210,17 @@ int main(void)
   HAL_GPIO_Init(GPIOQ, &GPIO_InitStruct);
   HAL_GPIO_WritePin(GPIOQ, GPIO_PIN_6, GPIO_PIN_SET);   /* backlight */
 
-  /* LCD_NRST (PE1) : sortir le panneau LCD du reset */
+  /* LCD_NRST (PE1) : reset cycle du panneau LCD (LOW → delay → HIGH) */
   GPIO_InitStruct.Pin   = LCD_NRST_Pin;
   GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull  = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LCD_NRST_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_WritePin(LCD_NRST_GPIO_Port, LCD_NRST_Pin, GPIO_PIN_RESET);
+  HAL_Delay(2);   /* assert reset ~2 ms */
   HAL_GPIO_WritePin(LCD_NRST_GPIO_Port, LCD_NRST_Pin, GPIO_PIN_SET);
-
-  HAL_Delay(50);  /* laisser le panneau demarrer */
+  HAL_Delay(120); /* panel startup time */
+  DBG_Print("[3] LCD power OK\r\n");
 
   /* --- LTDC GPIO : pins manquants dans MX_GPIO_Init + speed fix ---- */
   /* LCD_CLK (PB13) — CRITIQUE : pixel clock, absent du .ioc ! */
@@ -215,83 +237,536 @@ int main(void)
   GPIO_InitStruct.Pin       = LCD_R0_Pin;
   HAL_GPIO_Init(LCD_R0_GPIO_Port, &GPIO_InitStruct);
 
-  /* LCD_DE (PG13) : GPIO OUTPUT HIGH, pas AF14 (BSP DK board) */
-  GPIO_InitStruct.Pin   = LCD_DE_Pin;
-  GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull  = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  /* LCD_DE (PG13) : sur STM32N6570-DK c'est un signal "Display Enable"
+   * statique (GPIO output HIGH) et NON le signal DE genere par le LTDC.
+   * Le BSP ST officiel le configure en GPIO_OUTPUT_PP set HIGH.
+   * Configurer en AF14 provoque un ecran noir car le LTDC met DE a LOW
+   * pendant les periodes de blanking, ce que le panneau interprete comme
+   * "display OFF". */
+  GPIO_InitStruct.Pin       = LCD_DE_Pin;
+  GPIO_InitStruct.Mode      = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull      = GPIO_NOPULL;
+  GPIO_InitStruct.Speed     = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LCD_DE_GPIO_Port, &GPIO_InitStruct);
   HAL_GPIO_WritePin(LCD_DE_GPIO_Port, LCD_DE_Pin, GPIO_PIN_SET);
+  DBG_Print("[4] LTDC GPIO OK\r\n");
+
+  /* ---- GPIO READBACK : verifier que TrustZone n'a pas bloque ---- */
+  DBG_Print("[4b] GPIO readback:\r\n");
+  {
+    /* PB13 (LCD_CLK) doit etre AF14 (MODER=2, AFR=14) */
+    uint32_t moder_b = GPIOB_NS->MODER;
+    uint32_t afr1_b  = GPIOB_NS->AFR[1];
+    uint32_t pb13_mode = (moder_b >> (13*2)) & 0x3;
+    uint32_t pb13_af   = (afr1_b >> ((13-8)*4)) & 0xF;
+    DBG_Print("  PB13(CLK) mode="); DBG_PrintDec(pb13_mode);
+    DBG_Print(" AF="); DBG_PrintDec(pb13_af);
+    if (pb13_mode == 2 && pb13_af == 14)
+      DBG_Print(" -> AF14 OK\r\n");
+    else
+      DBG_Print(" -> !!! PAS AF14 - Recompiler AppliSecure! !!!\r\n");
+
+    /* PG13 (LCD_DE) doit etre OUTPUT (mode=1), HIGH */
+    uint32_t moder_g = GPIOG_NS->MODER;
+    uint32_t odr_g   = GPIOG_NS->ODR;
+    uint32_t pg13_mode = (moder_g >> (13*2)) & 0x3;
+    uint32_t pg13_val  = (odr_g >> 13) & 0x1;
+    DBG_Print("  PG13(DE) mode="); DBG_PrintDec(pg13_mode);
+    DBG_Print(" val="); DBG_PrintDec(pg13_val);
+    if (pg13_mode == 1 && pg13_val == 1)
+      DBG_Print(" -> OUTPUT HIGH OK\r\n");
+    else
+      DBG_Print(" -> !!! LCD_DE pas correct !!!\r\n");
+
+    /* PE1 (LCD_NRST) doit etre OUTPUT HIGH apres reset cycle */
+    uint32_t moder_e = GPIOE_NS->MODER;
+    uint32_t odr_e   = GPIOE_NS->ODR;
+    uint32_t pe1_mode = (moder_e >> (1*2)) & 0x3;
+    uint32_t pe1_val  = (odr_e >> 1) & 0x1;
+    DBG_Print("  PE1(NRST) mode="); DBG_PrintDec(pe1_mode);
+    DBG_Print(" val="); DBG_PrintDec(pe1_val);
+    if (pe1_mode == 1 && pe1_val == 1)
+      DBG_Print(" -> OUTPUT HIGH OK\r\n");
+    else
+      DBG_Print(" -> !!! NRST pas correct !!!\r\n");
+
+    /* PQ3 (LCD_ON) et PQ6 (backlight) */
+    uint32_t moder_q = GPIOQ->MODER;
+    uint32_t odr_q   = GPIOQ->ODR;
+    DBG_Print("  PQ3(ON) mode="); DBG_PrintDec((moder_q >> (3*2)) & 0x3);
+    DBG_Print(" val="); DBG_PrintDec((odr_q >> 3) & 0x1); DBG_Print("\r\n");
+    DBG_Print("  PQ6(BL) mode="); DBG_PrintDec((moder_q >> (6*2)) & 0x3);
+    DBG_Print(" val="); DBG_PrintDec((odr_q >> 6) & 0x1); DBG_Print("\r\n");
+  }
 
   /* =================================================================
-   *  TEST BAREMETAL LTDC ULTRA-MINIMAL
-   *  PAS de framebuffer, PAS de SRAM3 — seulement background color.
-   *  Si l'ecran affiche du ROUGE = hardware OK (GPIO + pixel clock).
-   *  Si ecran noir = probleme de clock ou GPIO.
+   *  DIAGNOSTIC : test SRAM3 + LTDC avant LVGL
    * ================================================================= */
+  DBG_Print("[5] DIAG START\r\n");
 
-  /* ---- PIXEL CLOCK : IC16 = PLL1 (1200 MHz) / 45 = 26.67 MHz ----
-   * CRITIQUE : doit etre configure AVANT d'activer le clock LTDC,
-   * sinon LTDC utilise PCLK5 (~200 MHz) et sature le bus AHB,
-   * tuant le SWD -> "Target is not responding".
-   */
-  MODIFY_REG(RCC->IC16CFGR,
-             RCC_IC16CFGR_IC16SEL | RCC_IC16CFGR_IC16INT,
-             (0U << RCC_IC16CFGR_IC16SEL_Pos) |   /* source = PLL1 */
-             (44U << RCC_IC16CFGR_IC16INT_Pos));   /* divider 45 (N-1) */
-  SET_BIT(RCC->DIVENSR, RCC_DIVENSR_IC16ENS);     /* enable IC16 */
-  while (!(RCC->DIVENR & RCC_DIVENR_IC16EN)) {}   /* wait enabled */
-  MODIFY_REG(RCC->CCIPR4, RCC_CCIPR4_LTDCSEL,
-             RCC_CCIPR4_LTDCSEL_1);                /* LTDC clock = IC16 */
+  /* Diagnostic : verifier que les horloges SRAM3/RAMCFG/RISAF sont actives
+   * On lit les registres de status (MEMENR, AHB2ENR, AHB3ENR) qui refletent
+   * l'etat reel des horloges. */
+  {
+    uint32_t memenr  = RCC->MEMENR;
+    uint32_t ahb2enr = RCC->AHB2ENR;
+    uint32_t ahb3enr = RCC->AHB3ENR;
+    uint32_t apb5enr = RCC->APB5ENR;
+    char h[12];
 
-  /* LTDC APB5 clock */
-  RCC->APB5ENR |= RCC_APB5ENR_LTDCEN;
-  __DSB();
+    DBG_Print("  MEMENR  = 0x");
+    for (int i = 7; i >= 0; i--) { int n = (memenr >> (i*4)) & 0xF; h[7-i] = n < 10 ? '0'+n : 'A'+n-10; } h[8] = '\0';
+    DBG_Print(h); DBG_Print("\r\n");
 
-  /* ---- Configurer LTDC — background color only, NO layer ---- */
-  #define DISP_W   800
-  #define DISP_H   480
-  #define HSYNC_W  4
-  #define HBP      4
-  #define HFP      4
-  #define VSYNC_W  4
-  #define VBP      4
-  #define VFP      4
+    DBG_Print("  AHB2ENR = 0x");
+    for (int i = 7; i >= 0; i--) { int n = (ahb2enr >> (i*4)) & 0xF; h[7-i] = n < 10 ? '0'+n : 'A'+n-10; } h[8] = '\0';
+    DBG_Print(h); DBG_Print("\r\n");
 
-  LTDC_TypeDef *ltdc = LTDC_NS;
+    DBG_Print("  AHB3ENR = 0x");
+    for (int i = 7; i >= 0; i--) { int n = (ahb3enr >> (i*4)) & 0xF; h[7-i] = n < 10 ? '0'+n : 'A'+n-10; } h[8] = '\0';
+    DBG_Print(h); DBG_Print("\r\n");
 
-  ltdc->GCR &= ~LTDC_GCR_LTDCEN;  /* disable pendant config */
+    DBG_Print("  APB5ENR = 0x");
+    for (int i = 7; i >= 0; i--) { int n = (apb5enr >> (i*4)) & 0xF; h[7-i] = n < 10 ? '0'+n : 'A'+n-10; } h[8] = '\0';
+    DBG_Print(h); DBG_Print("\r\n");
 
-  uint32_t accum_hbp = HSYNC_W + HBP - 1;
-  uint32_t accum_vbp = VSYNC_W + VBP - 1;
-  uint32_t accum_aw  = HSYNC_W + HBP + DISP_W - 1;
-  uint32_t accum_ah  = VSYNC_W + VBP + DISP_H - 1;
-  uint32_t total_w   = HSYNC_W + HBP + DISP_W + HFP - 1;
-  uint32_t total_h   = VSYNC_W + VBP + DISP_H + VFP - 1;
+    /* Verifier les bits attendus */
+    if (!(memenr & 0x3))  DBG_Print("  !!! SRAM3/4 clocks OFF !!!\r\n");
+    if (!(ahb2enr & (1UL<<12))) DBG_Print("  !!! RAMCFG clock OFF !!!\r\n");
+    if (!(ahb3enr & (1UL<<14))) DBG_Print("  !!! RISAF clock OFF !!!\r\n");
+    if (!(apb5enr & (1UL<<1)))  DBG_Print("  !!! LTDC clock OFF !!!\r\n");
 
-  ltdc->SSCR = ((HSYNC_W - 1) << LTDC_SSCR_HSW_Pos) |
-               ((VSYNC_W - 1) << LTDC_SSCR_VSH_Pos);
-  ltdc->BPCR = (accum_hbp << LTDC_BPCR_AHBP_Pos) |
-               (accum_vbp << LTDC_BPCR_AVBP_Pos);
-  ltdc->AWCR = (accum_aw << LTDC_AWCR_AAW_Pos) |
-               (accum_ah << LTDC_AWCR_AAH_Pos);
-  ltdc->TWCR = (total_w << LTDC_TWCR_TOTALW_Pos) |
-               (total_h << LTDC_TWCR_TOTALH_Pos);
+    /* Si SRAM3/4 OFF, tenter d'activer depuis NS (derniere chance) */
+    if (!(memenr & 0x3)) {
+      DBG_Print("  Trying NS MEMENSR write...\r\n");
+      RCC->MEMENSR = 0x3;  /* write-1-to-set bits 0+1 */
+      __DSB();
+      uint32_t memenr2 = RCC->MEMENR;
+      DBG_Print("  MEMENR after = 0x");
+      for (int i = 7; i >= 0; i--) { int n = (memenr2 >> (i*4)) & 0xF; h[7-i] = n < 10 ? '0'+n : 'A'+n-10; } h[8] = '\0';
+      DBG_Print(h); DBG_Print("\r\n");
+      if (!(memenr2 & 0x3)) {
+        DBG_Print("  SRAM3/4 CANNOT BE ENABLED - HALTING\r\n");
+        while(1) { HAL_Delay(1000); }
+      }
+    }
 
-  /* Fond ROUGE VIF — pas de layer active, le LTDC affiche juste BCCR */
-  ltdc->BCCR = 0x00FF0000;  /* R=FF, G=00, B=00 (format RGB888) */
+    /* Sortir SRAM3/SRAM4 du shutdown (SRAMSD) depuis NS.
+     * Le CLEAR_BIT dans AppliSecure a pu echouer si les clocks SRAM
+     * n'etaient pas encore actives a ce moment. Ici les clocks sont
+     * confirmees ON, donc le clear devrait prendre effet. */
+    DBG_Print("  Clearing SRAMSD from NS...\r\n");
+    {
+      /* Active RAMCFG clock depuis NS au cas ou */
+      RCC->AHB2ENSR = RCC_AHB2ENR_RAMCFGEN;
+      __DSB();
+      volatile RAMCFG_TypeDef *sram3 = RAMCFG_SRAM3_AXI_NS;
+      volatile RAMCFG_TypeDef *sram4 = RAMCFG_SRAM4_AXI_NS;
+      uint32_t cr3_before = sram3->CR;
+      uint32_t cr4_before = sram4->CR;
+      DBG_Print("  RAMCFG SRAM3 CR = 0x");
+      for (int i = 7; i >= 0; i--) { int n = (cr3_before >> (i*4)) & 0xF; h[7-i] = n < 10 ? '0'+n : 'A'+n-10; } h[8] = '\0';
+      DBG_Print(h); DBG_Print("\r\n");
 
-  /* Desactiver explicitement les deux layers */
-  LTDC_Layer1_NS->CR = 0;
-  LTDC_Layer2_NS->CR = 0;
+      CLEAR_BIT(sram3->CR, RAMCFG_CR_SRAMSD);
+      CLEAR_BIT(sram4->CR, RAMCFG_CR_SRAMSD);
+      __DSB();
+      /* Attendre que la SRAM sorte du shutdown */
+      for (volatile int d = 0; d < 1000; d++) {}
 
-  /* Reload immediat */
-  ltdc->SRCR = LTDC_SRCR_IMR;
+      uint32_t cr3_after = sram3->CR;
+      DBG_Print("  RAMCFG SRAM3 CR after = 0x");
+      for (int i = 7; i >= 0; i--) { int n = (cr3_after >> (i*4)) & 0xF; h[7-i] = n < 10 ? '0'+n : 'A'+n-10; } h[8] = '\0';
+      DBG_Print(h); DBG_Print("\r\n");
+      if (cr3_after & RAMCFG_CR_SRAMSD) {
+        DBG_Print("  !!! SRAMSD still set - RAMCFG is Secure-only !!!\r\n");
+      }
+    }
+  }
 
-  /* Activer LTDC */
-  ltdc->GCR |= LTDC_GCR_LTDCEN;
+  /* ---- RISAF4 : IASR/IAR lisibles en NS ; REG[] souvent 0 depuis NS (TrustZone) ---- */
+  {
+    char h[12];
+    volatile RISAF_TypeDef *r4 = RISAF4_NS;
 
-  DBG_Print("LTDC red background active\r\n");
+    #define PHEX(label, val) do { \
+      uint32_t _v = (val); \
+      DBG_Print(label " = 0x"); \
+      for(int _i=7;_i>=0;_i--){int _n=(_v>>(_i*4))&0xF; h[7-_i]=_n<10?'0'+_n:'A'+_n-10;} h[8]='\0'; \
+      DBG_Print(h); DBG_Print("\r\n"); } while(0)
+
+    DBG_Print("[RISAF4] dump (NS):\r\n");
+    PHEX("  CR      ", r4->CR);
+    PHEX("  IASR    ", r4->IASR);
+    PHEX("  R1.CFGR ", r4->REG[0].CFGR);
+    PHEX("  R1.START", r4->REG[0].STARTR);
+    PHEX("  R1.END  ", r4->REG[0].ENDR);
+    PHEX("  R1.CIDCF", r4->REG[0].CIDCFGR);
+    PHEX("  IAR.IAES", r4->IAR[0].IAESR);
+    PHEX("  IAR.IADR", r4->IAR[0].IADDR);
+
+    uint32_t cfgr = r4->REG[0].CFGR;
+    uint32_t cidcfgr = r4->REG[0].CIDCFGR;
+    uint32_t startr = r4->REG[0].STARTR;
+    if (cfgr == 0U && cidcfgr == 0U && startr == 0U) {
+      DBG_Print("  (REG[] all zero from NS — normal TZ; config done on RISAF4_S in AppliSecure)\r\n");
+    } else {
+      if (!(cfgr & 0x1))
+        DBG_Print("  !!! RISAF4 R1 NOT ENABLED (BREN=0) !!!\r\n");
+      if (cfgr & (1UL << 8))
+        DBG_Print("  !!! RISAF4 R1 SEC bit set — LTDC is NSEC !!!\r\n");
+      if (cfgr & (0xFFUL << 16))
+        DBG_Print("  !!! RISAF4 R1 PRIVC bits set — check PRIV match !!!\r\n");
+      if (!(cidcfgr & (1UL << 1)))
+        DBG_Print("  !!! RISAF4 R1 RDENC1 not set — CID1 cannot read !!!\r\n");
+      if ((cfgr & 0x1) && (cidcfgr & 0x00FF00FF) == 0x00FF00FF
+          && !(cfgr & 0x00FF0100))
+        DBG_Print("  RISAF4 R1 config looks GOOD (open, NSEC, NPRIV)\r\n");
+    }
+
+    #undef PHEX
+  }
+
+  /* SRAM3 @ 0x24200000 : test memoire (meme banque que FBRAM / FB LTDC dans .ld) */
+  {
+    volatile uint16_t *sram3_probe = (volatile uint16_t *)0x24200000U;
+    sram3_probe[0] = 0xBEEFU;
+    uint16_t readback = sram3_probe[0];
+    DBG_Print("SRAM3 W/R test: wrote 0xBEEF, read 0x");
+    {
+      char hex[8];
+      for (int i = 3; i >= 0; i--) {
+        int nib = (readback >> (i*4)) & 0xF;
+        hex[3-i] = (nib < 10) ? ('0'+nib) : ('A'+nib-10);
+      }
+      hex[4] = '\0';
+      DBG_Print(hex);
+    }
+    if (readback == 0xBEEFU) {
+      DBG_Print(" -> OK\r\n");
+    } else {
+      DBG_Print(" -> FAIL! SRAM3 inaccessible!\r\n");
+    }
+  }
+
+  /* Framebuffer LTDC : section .framebuffer en SRAM3 (FBRAM dans .ld), pas SRAM1 */
+  {
+    uint32_t fb_bytes = ltdc_fb_size_bytes();
+    volatile uint16_t *fb = (volatile uint16_t *)(uintptr_t)&_fb_start;
+    DBG_Print("LTDC FB: _fb_start, size=");
+    DBG_PrintDec(fb_bytes);
+    DBG_Print(" B (expect 768000)\r\n");
+    DBG_Print("Filling LTDC FB (SRAM3) RED RGB565 0xF800...\r\n");
+    for (uint32_t i = 0; i < (800U * 480U); i++) {
+      fb[i] = 0xF800U;
+    }
+    __DSB();
+    lv_port_ltdc_flush_fb_range((const void *)&_fb_start, fb_bytes);
+    {
+      uint16_t samples[3] = { fb[0], fb[400U * 800U], fb[800U * 480U - 1U] };
+      DBG_Print("FB CPU readback after fill: [0],[mid],[last] = ");
+      for (int s = 0; s < 3; s++) {
+        char hx[8];
+        uint16_t v = samples[s];
+        for (int i = 3; i >= 0; i--) {
+          int nib = (v >> (i*4)) & 0xF;
+          hx[3-i] = (nib < 10) ? ('0'+nib) : ('A'+nib-10);
+        }
+        hx[4] = '\0';
+        DBG_Print("0x");
+        DBG_Print(hx);
+        if (s < 2) DBG_Print(" ");
+      }
+      DBG_Print("\r\n");
+    }
+  }
+
+  /* Afficher les registres LTDC cles */
+  DBG_Print("RCC->MEMENR = 0x");
+  DBG_PrintDec(RCC->MEMENR);
+  DBG_Print("\r\n");
+  DBG_Print("RCC->APB5ENR = 0x");
+  DBG_PrintDec(RCC->APB5ENR);
+  DBG_Print("\r\n");
+
+  /* =================================================================
+   *  LTDC clock config : tenter depuis NS (fonctionne si PUBCFGR
+   *  est configure par AppliSecure recompile)
+   * ================================================================= */
+  if (!(RCC->APB5ENR & RCC_APB5ENR_LTDCEN)) {
+    DBG_Print("[5b] Trying LTDC clocks from NS...\r\n");
+
+    /* IC16 = PLL1 / 45 = 26.67 MHz pixel clock */
+    MODIFY_REG(RCC->IC16CFGR,
+               RCC_IC16CFGR_IC16SEL | RCC_IC16CFGR_IC16INT,
+               (0U  << RCC_IC16CFGR_IC16SEL_Pos) |
+               (44U << RCC_IC16CFGR_IC16INT_Pos));
+    RCC->DIVENSR = RCC_DIVENSR_IC16ENS;
+    for (volatile int w = 0; w < 10000; w++) {}
+    /* LTDC kernel clock source = IC16 */
+    MODIFY_REG(RCC->CCIPR4, RCC_CCIPR4_LTDCSEL, RCC_CCIPR4_LTDCSEL_1);
+    /* LTDC peripheral clock (APB5) */
+    RCC->APB5ENSR = RCC_APB5ENR_LTDCEN;
+    __DSB();
+    for (volatile int w = 0; w < 10000; w++) {}
+
+    uint32_t apb5  = RCC->APB5ENR;
+    uint32_t divenr = RCC->DIVENR;
+    if (apb5 & RCC_APB5ENR_LTDCEN)
+      DBG_Print("  APB5 LTDC clock ON (NS write OK)\r\n");
+    else
+      DBG_Print("  !!! APB5 LTDC clock STILL OFF — recompile AppliSecure! !!!\r\n");
+    if (divenr & RCC_DIVENR_IC16EN)
+      DBG_Print("  IC16 pixel clock ON\r\n");
+    else
+      DBG_Print("  !!! IC16 STILL OFF — recompile AppliSecure! !!!\r\n");
+  } else {
+    DBG_Print("[5b] LTDC clock already ON (Secure config OK)\r\n");
+  }
+
+  /* =================================================================
+   *  LVGL init : display driver + tick + bouton de test
+   * ================================================================= */
+#if APP_LTDC_VISUAL_TEST
+  DBG_Print("[6] LTDC hw only (APP_LTDC_VISUAL_TEST)...\r\n");
+  lv_port_ltdc_hw_init_only();
+  DBG_Print("[7] LTDC hw OK (LVGL skipped)\r\n");
+#else
+  DBG_Print("[6] LVGL init...\r\n");
+  lv_port_init();   /* lv_init() + display LTDC + tick */
+  DBG_Print("[7] LVGL init OK\r\n");
+#endif
+
+  /* Adresse CFBAR du layer materiel utilise (L2, aligne BSP HAL layer 0). */
+  {
+    volatile uint32_t cfbar = ((LTDC_Layer_TypeDef *)LTDC_Layer2_BASE_NS)->CFBAR;
+    DBG_Print("LTDC L2 CFBAR = 0x");
+    char hex[12];
+    for (int i = 7; i >= 0; i--) {
+      int nib = (cfbar >> (i*4)) & 0xF;
+      hex[7-i] = (nib < 10) ? ('0'+nib) : ('A'+nib-10);
+    }
+    hex[8] = '\0';
+    DBG_Print(hex);
+    DBG_Print("\r\n");
+  }
+  {
+    volatile uint32_t gcr = LTDC_NS->GCR;
+    DBG_Print("LTDC GCR = 0x");
+    char hex[12];
+    for (int i = 7; i >= 0; i--) {
+      int nib = (gcr >> (i*4)) & 0xF;
+      hex[7-i] = (nib < 10) ? ('0'+nib) : ('A'+nib-10);
+    }
+    hex[8] = '\0';
+    DBG_Print(hex);
+    DBG_Print("\r\n");
+  }
+  /* Verify LTDC clocks are active (configured by AppliSecure) */
+  {
+    char hex[12];
+    uint32_t apb5 = RCC->APB5ENR;
+    uint32_t divr = RCC->DIVENR;
+    DBG_Print("APB5ENR(post) = 0x");
+    for (int i = 7; i >= 0; i--) { int n = (apb5 >> (i*4)) & 0xF; hex[7-i] = n < 10 ? '0'+n : 'A'+n-10; } hex[8] = '\0';
+    DBG_Print(hex); DBG_Print("\r\n");
+    DBG_Print("DIVENR = 0x");
+    for (int i = 7; i >= 0; i--) { int n = (divr >> (i*4)) & 0xF; hex[7-i] = n < 10 ? '0'+n : 'A'+n-10; } hex[8] = '\0';
+    DBG_Print(hex); DBG_Print("\r\n");
+    if (!(apb5 & RCC_APB5ENR_LTDCEN))
+      DBG_Print("!!! APB5 LTDC clock STILL OFF !!!\r\n");
+    if (!(divr & RCC_DIVENR_IC16EN))
+      DBG_Print("!!! IC16 pixel clock STILL OFF !!!\r\n");
+  }
+
+  /* ---------- LTDC full register dump ---------- */
+  {
+    char h[12];
+    LTDC_TypeDef       *lt = LTDC_NS;
+    LTDC_Layer_TypeDef *ly = LTDC_Layer2_NS;
+
+    #define PREG(label, val) do { \
+      uint32_t _v = (val); \
+      DBG_Print(label " = 0x"); \
+      for(int _i=7;_i>=0;_i--){int _n=(_v>>(_i*4))&0xF; h[7-_i]=_n<10?'0'+_n:'A'+_n-10;} h[8]='\0'; \
+      DBG_Print(h); DBG_Print("\r\n"); } while(0)
+
+    PREG("SSCR ", lt->SSCR);
+    PREG("BPCR ", lt->BPCR);
+    PREG("AWCR ", lt->AWCR);
+    PREG("TWCR ", lt->TWCR);
+    PREG("ISR  ", lt->ISR);
+    PREG("CDSR ", lt->CDSR);
+
+    /* Read CPSR twice with delay to see if scan position moves */
+    uint32_t cpsr1 = lt->CPSR;
+    for(volatile int d=0; d<100000; d++){}
+    uint32_t cpsr2 = lt->CPSR;
+    PREG("CPSR1", cpsr1);
+    PREG("CPSR2", cpsr2);
+    if (cpsr1 == cpsr2)
+      DBG_Print("!!! CPSR not moving - LTDC not scanning !!!\r\n");
+    else
+      DBG_Print("CPSR moving - LTDC is scanning OK\r\n");
+
+    PREG("L2.CR   ", ly->CR);
+    PREG("L2.RCR  ", ly->RCR);
+    PREG("L2.WHPCR", ly->WHPCR);
+    PREG("L2.WVPCR", ly->WVPCR);
+    PREG("L2.PFCR ", ly->PFCR);
+    PREG("L2.CACR ", ly->CACR);
+    PREG("L2.BFCR ", ly->BFCR);
+    PREG("L2.CFBAR", ly->CFBAR);
+    PREG("L2.CFBLR", ly->CFBLR);
+    PREG("L2.CFBLNR", ly->CFBLNR);
+
+    {
+      LTDC_Layer_TypeDef *l1 = LTDC_Layer1_NS;
+      PREG("L1.CR   ", l1->CR);
+      PREG("L1.CFBAR", l1->CFBAR);
+    }
+
+    /* Check ISR error bits */
+    uint32_t isr = lt->ISR;
+    if (isr & (1<<1))  DBG_Print("!!! FIFO underrun WARNING !!!\r\n");
+    if (isr & (1<<2))  DBG_Print("!!! Transfer ERROR (RISAF?) !!!\r\n");
+    if (isr & (1<<6))  DBG_Print("!!! FIFO underrun KILL !!!\r\n");
+
+    #undef PREG
+  }
+
+  /* Relecture CPU du meme FB apres LTDC layer actif : si 0x0000 alors bus/RISAF bloque les reads NS */
+  {
+    volatile uint16_t *fb = (volatile uint16_t *)(uintptr_t)&_fb_start;
+    uint16_t samples[3] = { fb[0], fb[400U * 800U], fb[800U * 480U - 1U] };
+    DBG_Print("FB CPU readback after LTDC scan: [0],[mid],[last] = ");
+    for (int s = 0; s < 3; s++) {
+      char hx[8];
+      uint16_t v = samples[s];
+      for (int i = 3; i >= 0; i--) {
+        int nib = (v >> (i*4)) & 0xF;
+        hx[3-i] = (nib < 10) ? ('0'+nib) : ('A'+nib-10);
+      }
+      hx[4] = '\0';
+      DBG_Print("0x");
+      DBG_Print(hx);
+      if (s < 2) DBG_Print(" ");
+    }
+    DBG_Print("\r\n");
+  }
+
+  DBG_Print("--- DIAG END ---\r\n");
+
+  /* --- RISAF4 post-LTDC check : le LTDC a deja commence a scanner ---
+   * Si RISAF4 a refuse des acces, IASR sera non-zero */
+  {
+    char h[12];
+    uint32_t iasr = RISAF4_NS->IASR;
+    uint32_t iaesr = RISAF4_NS->IAR[0].IAESR;
+    uint32_t iaddr = RISAF4_NS->IAR[0].IADDR;
+    if (iasr) {
+      DBG_Print("[RISAF4] !!! ILLEGAL ACCESS DETECTED !!!\r\n");
+      DBG_Print("  IASR  = 0x");
+      for(int i=7;i>=0;i--){int n=(iasr>>(i*4))&0xF;h[7-i]=n<10?'0'+n:'A'+n-10;} h[8]='\0';
+      DBG_Print(h); DBG_Print("\r\n");
+      DBG_Print("  IAESR = 0x");
+      for(int i=7;i>=0;i--){int n=(iaesr>>(i*4))&0xF;h[7-i]=n<10?'0'+n:'A'+n-10;} h[8]='\0';
+      DBG_Print(h); DBG_Print("\r\n");
+      DBG_Print("  IADDR = 0x");
+      for(int i=7;i>=0;i--){int n=(iaddr>>(i*4))&0xF;h[7-i]=n<10?'0'+n:'A'+n-10;} h[8]='\0';
+      DBG_Print(h); DBG_Print("\r\n");
+    } else {
+      DBG_Print("[RISAF4] No illegal access (IASR=0) — good\r\n");
+    }
+  }
+
+  /* RISAF2 / SRAM1 : IASR != 0 => acces vers FB refuses par le filtre */
+  {
+    char h[12];
+    uint32_t i2 = RISAF2_NS->IASR;
+    DBG_Print("[RISAF2] IASR = 0x");
+    for (int i = 7; i >= 0; i--) {
+      int n = (i2 >> (i*4)) & 0xF;
+      h[7-i] = n < 10 ? '0'+n : 'A'+n-10;
+    }
+    h[8] = '\0';
+    DBG_Print(h);
+    if (i2) {
+      uint32_t iaesr = RISAF2_NS->IAR[0].IAESR;
+      uint32_t iaddr = RISAF2_NS->IAR[0].IADDR;
+      DBG_Print(" IAESR=0x");
+      for (int i = 7; i >= 0; i--) {
+        int n = (iaesr >> (i*4)) & 0xF;
+        h[7-i] = n < 10 ? '0'+n : 'A'+n-10;
+      }
+      h[8] = '\0';
+      DBG_Print(h);
+      DBG_Print(" IADDR=0x");
+      for (int i = 7; i >= 0; i--) {
+        int n = (iaddr >> (i*4)) & 0xF;
+        h[7-i] = n < 10 ? '0'+n : 'A'+n-10;
+      }
+      h[8] = '\0';
+      DBG_Print(h);
+      DBG_Print(" !!!\r\n");
+    } else {
+      DBG_Print(" OK\r\n");
+    }
+  }
+
+  /* === TEST COULEUR DE FOND (Background Color Test) ===
+   * Desactive le layer, met BCCR en BLEU VIF.
+   * BLEU visible = LTDC output OK (signaux atteignent le panneau)
+   * Toujours NOIR = GPIO/signal physique ne sort pas */
+  /* Ne pas utiliser LTDC_SRCR_IMR : sur STM32N6 cela peut corrompre l'etat des layers
+   * (voir lv_port_disp_ltdc.c). Reload vertical blanking uniquement. */
+#if !APP_LTDC_VISUAL_TEST
+  DBG_Print("[BG TEST] Layer OFF + BCCR=BLEU... observer 5s\r\n");
+  {
+    LTDC_Layer_TypeDef *ly = LTDC_Layer2_NS;
+    LTDC_NS->BCCR = 0x000000FF;          /* bleu vif RGB888 */
+    ly->CR &= ~0x01U;                     /* desactiver layer 2 */
+    ly->RCR = (1U << 0) | (1U << 2);     /* per-layer reload IMR|GRMSK */
+    LTDC_NS->SRCR = LTDC_SRCR_VBR;
+    __DSB();
+    {
+      uint32_t t0 = HAL_GetTick();
+      while (!(LTDC_NS->ISR & LTDC_ISR_RRIF) && (HAL_GetTick() - t0) < 50U) {}
+      LTDC_NS->ICR = LTDC_ICR_CRRIF;
+    }
+  }
+  HAL_Delay(5000);  /* 5 secondes pour observer */
+
+  /* Remettre le layer et fond noir */
+  {
+    LTDC_Layer_TypeDef *ly = LTDC_Layer2_NS;
+    LTDC_NS->BCCR = 0x00000000;  /* fond noir */
+    ly->CR |= 0x01U;
+    ly->RCR = (1U << 0) | (1U << 2);
+    LTDC_NS->SRCR = LTDC_SRCR_VBR;
+    __DSB();
+    {
+      uint32_t t0 = HAL_GetTick();
+      while (!(LTDC_NS->ISR & LTDC_ISR_RRIF) && (HAL_GetTick() - t0) < 50U) {}
+      LTDC_NS->ICR = LTDC_ICR_CRRIF;
+    }
+  }
+  DBG_Print("[BG TEST] Fin - layer reactive\r\n");
+  HAL_Delay(1000);
+
+  /* Creer un bouton avec label au centre de l'ecran */
+  lv_obj_t *btn = lv_button_create(lv_screen_active());
+  lv_obj_center(btn);
+  lv_obj_set_size(btn, 200, 60);
+
+  lv_obj_t *label = lv_label_create(btn);
+  lv_label_set_text(label, "Hello LVGL!");
+  lv_obj_center(label);
+
+  DBG_Print("LVGL ready - button created\r\n");
+#else
+  ltdc_visual_test_run_sequence(DBG_Print, 3000U);
+#endif
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -309,6 +784,12 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+#if APP_LTDC_VISUAL_TEST
+    ltdc_visual_test_loop_cycle(DBG_Print, 2500U);
+#else
+    lv_timer_handler();   /* LVGL : traiter les taches en attente */
+#endif
+
     uint32_t now = HAL_GetTick();
 
     /* --- Chenillard : une LED a la fois, avance toutes les 150 ms --- */

@@ -6,12 +6,16 @@
 #include "lv_port_tick.h"
 #include "lvgl.h"
 
+static volatile uint8_t tick_enabled = 0;
+
 void lv_port_tick_init(void)
 {
-    /* Le tick est géré par l’interruption SysTick ; appeler lv_port_tick_inc(1) depuis le handler. */
+    tick_enabled = 1;
 }
 
 void lv_port_tick_inc(uint32_t tick_period)
 {
-    lv_tick_inc(tick_period);
+    if (tick_enabled) {
+        lv_tick_inc(tick_period);
+    }
 }
