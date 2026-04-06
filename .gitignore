@@ -7,8 +7,12 @@
 .metadata/
 .mxproject
 
-# VS Code
-.vscode/
+# VS Code — include workspace configs, exclude machine-specific
+.vscode/*
+!.vscode/README.md
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/c_cpp_properties.json
 
 # Object files
 *.o

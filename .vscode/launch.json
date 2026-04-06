@@ -1,0 +1,58 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "FSBL: Debug (ST-LINK)",
+            "type": "cortex-debug",
+            "request": "attach",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/FSBL/Debug/first_FSBL.elf",
+            "servertype": "stlink",
+            "device": "STM32N657X0HxQ",
+            "interface": "swd",
+            "serialNumber": "004200253234511233353533",
+            "svdFile": "",
+            "serverpath": "C:\\ST\\STM32CubeIDE_1.13.0\\STM32CubeIDE\\plugins\\com.st.stm32cube.ide.mcu.externaltools.stlink-gdb-server.win32_2.2.400.202601091506\\tools\\bin\\ST-LINK_gdbserver.exe",
+            "armToolchainPath": "C:\\ST\\STM32CubeIDE_1.13.0\\STM32CubeIDE\\plugins\\com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.14.3.rel1.win32_1.0.100.202602081740\\tools\\bin",
+            "stm32cubeprogrammer": "C:\\ST\\STM32CubeIDE_1.13.0\\STM32CubeIDE\\plugins\\com.st.stm32cube.ide.mcu.externaltools.cubeprogrammer.win32_2.2.400.202601091506\\tools\\bin",
+            "serverArgs": [
+                "-m", "1",
+                "-k"
+            ],
+            "preLaunchTask": "FSBL: Build + Load (debug)",
+            "postAttachCommands": [
+                "set $sp = 0x34200000",
+                "set $pc = Reset_Handler",
+                "break main",
+                "continue"
+            ],
+            "overrideRestartCommands": [
+                "monitor halt",
+                "load",
+                "set $sp = 0x34200000",
+                "set $pc = Reset_Handler",
+                "break main",
+                "continue"
+            ]
+        },
+        {
+            "name": "FSBL: Attach (ST-LINK)",
+            "type": "cortex-debug",
+            "request": "attach",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/FSBL/Debug/first_FSBL.elf",
+            "servertype": "stlink",
+            "device": "STM32N657X0HxQ",
+            "interface": "swd",
+            "serialNumber": "004200253234511233353533",
+            "svdFile": "",
+            "serverpath": "C:\\ST\\STM32CubeIDE_1.13.0\\STM32CubeIDE\\plugins\\com.st.stm32cube.ide.mcu.externaltools.stlink-gdb-server.win32_2.2.400.202601091506\\tools\\bin\\ST-LINK_gdbserver.exe",
+            "armToolchainPath": "C:\\ST\\STM32CubeIDE_1.13.0\\STM32CubeIDE\\plugins\\com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.14.3.rel1.win32_1.0.100.202602081740\\tools\\bin",
+            "stm32cubeprogrammer": "C:\\ST\\STM32CubeIDE_1.13.0\\STM32CubeIDE\\plugins\\com.st.stm32cube.ide.mcu.externaltools.cubeprogrammer.win32_2.2.400.202601091506\\tools\\bin",
+            "serverArgs": [
+                "-m", "1",
+                "-k"
+            ]
+        }
+    ]
+}
