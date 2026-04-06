@@ -14,9 +14,6 @@ extern "C" {
 
 void lv_port_disp_init(void);
 
-/** LTDC + layer + FB physiques, sans creer d'objet LVGL. */
-void lv_port_ltdc_hw_init_only(void);
-
 /**
  * Nettoie le D-cache sur une zone memoire (obligatoire avant que le LTDC lise le FB).
  * @param addr   debut (alignement gere par CMSIS)

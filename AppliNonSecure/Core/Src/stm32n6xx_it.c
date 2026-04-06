@@ -105,25 +105,6 @@ static void fault_blink(uint32_t pattern)
 /******************************************************************************/
 /*           Cortex Processor Interruption and Exception Handlers          */
 /******************************************************************************/
-
-/**
-  * @brief This function handles Hard fault.
-  */
-void HardFault_Handler(void)
-{
-  fault_uart_print("\r\n*** HARDFAULT ***\r\n");
-  fault_blink(0x07);  /* GREEN+YELLOW+RED = HardFault */
-}
-
-/**
-  * @brief This function handles Bus fault.
-  */
-void BusFault_Handler(void)
-{
-  fault_uart_print("\r\n*** BUSFAULT ***\r\n");
-  fault_blink(0x0C);  /* RED+BLUE = BusFault */
-}
-
 /**
   * @brief This function handles Memory management fault.
   */

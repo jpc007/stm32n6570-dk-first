@@ -58,6 +58,17 @@ static void SystemIsolation_Config(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+/* --- Boot trace via USART2 (configure par FSBL, registres persistent) --- */
+static void boot_trace_putc(char c)
+{
+    while (!(USART2->ISR & USART_ISR_TXE_TXFNF)) {}
+    USART2->TDR = (uint8_t)c;
+}
+static void boot_trace(const char *s)
+{
+    while (*s) boot_trace_putc(*s++);
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -85,6 +96,38 @@ int main(void)
   /* Initialize all configured peripherals */
   SystemIsolation_Config();
   /* USER CODE BEGIN 2 */
+
+  /* ============================================================
+   * BOOT STAGE 2 : LED JAUNE (PE9) 3s, puis LED ROUGE (PH5) 3s
+   * USART2 configure par FSBL (registres persistent apres jump).
+   * SysTick tourne (HAL_SuspendTick pas encore appele).
+   * ============================================================ */
+  {
+    GPIO_InitTypeDef gpio = {0};
+    gpio.Mode  = GPIO_MODE_OUTPUT_PP;
+    gpio.Pull  = GPIO_NOPULL;
+    gpio.Speed = GPIO_SPEED_FREQ_LOW;
+
+    /* LED JAUNE (PE9) — GPIOE clock deja ON (SystemIsolation_Config) */
+    gpio.Pin = GPIO_PIN_9;
+    HAL_GPIO_Init(GPIOE, &gpio);
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_9, GPIO_PIN_SET);
+
+    boot_trace("=== [2/3 AppliSecure] LED JAUNE ===\r\n");
+    HAL_Delay(500);
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_9, GPIO_PIN_RESET);
+
+    /* LED ROUGE (PH5) — GPIOH clock deja ON (SystemIsolation_Config) */
+    gpio.Pin = GPIO_PIN_5;
+    HAL_GPIO_Init(GPIOH, &gpio);
+    HAL_GPIO_WritePin(GPIOH, GPIO_PIN_5, GPIO_PIN_SET);
+
+    boot_trace("=== [2/3 AppliSecure] LED ROUGE ===\r\n");
+    HAL_Delay(500);
+    HAL_GPIO_WritePin(GPIOH, GPIO_PIN_5, GPIO_PIN_RESET);
+
+    boot_trace("=== [2/3 AppliSecure] -> NonSecure ===\r\n");
+  }
 
   /* USER CODE END 2 */
 
@@ -502,6 +545,157 @@ void PeriphCommonClock_Config(void)
   for (volatile int _d = 0; _d < 100; _d++) {} /* brief delay */
   RCC_S->APB5RSTCR = RCC_APB5RSTR_LTDCRST;   /* release reset */
   __DSB();
+
+  /* ================================================================
+   * 7) LTDC FULL INIT FROM SECURE
+   *    Les ecritures NS vers LTDC_NS sont silencieusement ignorees
+   *    (CFBAR reste a 0 apres write depuis NS). On programme donc
+   *    TOUT ici avec les alias _S, puis NS n'a plus qu'a ecrire
+   *    dans le framebuffer (SRAM3 0x24200000, deja NSEC).
+   * ================================================================ */
+  {
+    /* --- 7a) GPIO AF14 pour toutes les broches LCD (comme LTDC_MspInit BSP) --- */
+    GPIO_InitTypeDef gpio = {0};
+
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    __HAL_RCC_GPIOD_CLK_ENABLE();
+    __HAL_RCC_GPIOE_CLK_ENABLE();
+    __HAL_RCC_GPIOG_CLK_ENABLE();
+    __HAL_RCC_GPIOH_CLK_ENABLE();
+    __HAL_RCC_GPIOQ_CLK_ENABLE();
+
+    gpio.Mode      = GPIO_MODE_AF_PP;
+    gpio.Pull      = GPIO_NOPULL;
+    gpio.Speed     = GPIO_SPEED_FREQ_HIGH;
+
+    /* PA0 R1, PA1 G0, PA2 B0, PA7 B1, PA8 G1, PA15 R5 */
+    gpio.Pin       = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_7|GPIO_PIN_8|GPIO_PIN_15;
+    gpio.Alternate = GPIO_AF14_LCD;
+    HAL_GPIO_Init(GPIOA, &gpio);
+
+    /* PB2 G4, PB4 R3, PB11 G5, PB12 G6, PB13 CLK, PB14 VSYNC, PB15 B7 */
+    gpio.Pin       = GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_2|GPIO_PIN_4|GPIO_PIN_11|GPIO_PIN_12|GPIO_PIN_15;
+    gpio.Alternate = GPIO_AF14_LCD;
+    HAL_GPIO_Init(GPIOB, &gpio);
+
+    /* PD8 B6, PD9 B3, PD15 R7 */
+    gpio.Pin       = GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_15;
+    gpio.Alternate = GPIO_AF14_LCD;
+    HAL_GPIO_Init(GPIOD, &gpio);
+
+    /* PE11 HSYNC */
+    gpio.Pin       = GPIO_PIN_11;
+    gpio.Alternate = GPIO_AF14_LCD;
+    HAL_GPIO_Init(GPIOE, &gpio);
+
+    /* PG0 R0, PG1 R2, PG6 R4, PG8 G2, PG11 B2, PG12 G3 */
+    gpio.Pin       = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_6|GPIO_PIN_8|GPIO_PIN_11|GPIO_PIN_12;
+    gpio.Alternate = GPIO_AF14_LCD;
+    HAL_GPIO_Init(GPIOG, &gpio);
+
+    /* PH3 B4, PH4 R4, PH6 B5 */
+    gpio.Pin       = GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_6;
+    gpio.Alternate = GPIO_AF14_LCD;
+    HAL_GPIO_Init(GPIOH, &gpio);
+
+    /* --- 7b) LCD power / backlight / DE / NRST (sorties PP) --- */
+    gpio.Mode  = GPIO_MODE_OUTPUT_PP;
+    gpio.Speed = GPIO_SPEED_FREQ_LOW;
+    gpio.Pull  = GPIO_NOPULL;
+
+    /* PQ3 LCD_ON, PQ6 LCD_BL_CTRL */
+    gpio.Pin = GPIO_PIN_3|GPIO_PIN_6;
+    HAL_GPIO_Init(GPIOQ, &gpio);
+    HAL_GPIO_WritePin(GPIOQ, GPIO_PIN_3, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(GPIOQ, GPIO_PIN_6, GPIO_PIN_SET);
+
+    /* PG13 LCD_DE (Display Enable) — avec pull-up comme BSP_LCD_DisplayOn */
+    gpio.Pin  = GPIO_PIN_13;
+    gpio.Pull = GPIO_PULLUP;
+    HAL_GPIO_Init(GPIOG, &gpio);
+    HAL_GPIO_WritePin(GPIOG, GPIO_PIN_13, GPIO_PIN_SET);
+
+    /* PE1 LCD_NRST — cycle reset panneau */
+    gpio.Pin  = GPIO_PIN_1;
+    gpio.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOE, &gpio);
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_RESET);
+    HAL_Delay(2);
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_SET);
+    HAL_Delay(120);
+
+    /* --- 7c) Programmer les registres LTDC via alias Secure --- */
+    LTDC_TypeDef       *ltdc  = LTDC_S;
+    LTDC_Layer_TypeDef *layer = LTDC_Layer1_S;
+
+    ltdc->GCR &= ~LTDC_GCR_LTDCEN;
+    __DSB();
+    ltdc->GCR = 0U;
+    __DSB();
+
+    LTDC_Layer1_S->CR    = 0U;
+    LTDC_Layer1_S->CFBAR = 0U;
+    LTDC_Layer1_S->BFCR  = 0U;
+    LTDC_Layer2_S->CR    = 0U;
+    LTDC_Layer2_S->CFBAR = 0U;
+    LTDC_Layer2_S->BFCR  = 0U;
+
+    /* RK050HR18 : 800x480, HSYNC/HBP/HFP/VSYNC/VBP/VFP = 4 */
+    const uint32_t w = 800U, h = 480U;
+    const uint32_t hsw = 4U, hbp = 4U, hfp = 4U;
+    const uint32_t vsw = 4U, vbp = 4U, vfp = 4U;
+
+    uint32_t accum_hbp = hsw + hbp - 1U;
+    uint32_t accum_vbp = vsw + vbp - 1U;
+    uint32_t accum_aw  = hsw + w + hbp - 1U;
+    uint32_t accum_ah  = vsw + h + vbp - 1U;
+    uint32_t total_w   = hsw + w + hbp + hfp - 1U;
+    uint32_t total_h   = vsw + h + vbp + vfp - 1U;
+
+    ltdc->SSCR = ((hsw - 1U) << LTDC_SSCR_HSW_Pos) | ((vsw - 1U) << LTDC_SSCR_VSH_Pos);
+    ltdc->BPCR = (accum_hbp << LTDC_BPCR_AHBP_Pos) | (accum_vbp << LTDC_BPCR_AVBP_Pos);
+    ltdc->AWCR = (accum_aw  << LTDC_AWCR_AAW_Pos)  | (accum_ah  << LTDC_AWCR_AAH_Pos);
+    ltdc->TWCR = (total_w   << LTDC_TWCR_TOTALW_Pos)| (total_h   << LTDC_TWCR_TOTALH_Pos);
+
+    /* HSPOL/VSPOL/DEPOL = active-low (0), PCPOL = IPC (inverted) */
+    ltdc->GCR = LTDC_GCR_BCKEN | LTDC_GCR_PCPOL;
+    ltdc->BCCR = 0x00000000U;
+
+    uint32_t h_start = accum_hbp + 1U;
+    uint32_t h_stop  = accum_hbp + w;
+    uint32_t v_start = accum_vbp + 1U;
+    uint32_t v_stop  = accum_vbp + h;
+
+    layer->WHPCR  = (h_start << 0) | (h_stop << 16);
+    layer->WVPCR  = (v_start << 0) | (v_stop << 16);
+    layer->PFCR   = 2U;           /* RGB565 */
+    layer->CACR   = 0xFFU;        /* alpha constant = opaque */
+    layer->DCCR   = 0x00000000U;
+    layer->BFCR   = (0x06U << LTDC_LxBFCR_BF1_Pos) | (0x07U << LTDC_LxBFCR_BF2_Pos);
+    layer->CFBAR  = 0x24200000U;  /* framebuffer SRAM3 (adresse NS = identique pour DMA LTDC) */
+    layer->CFBLR  = ((w * 2U) << 16) | ((w * 2U) + 7U);
+    layer->CFBLNR = h;
+
+    /* --- 7d) Remplir le framebuffer avec du BLANC (RGB565 = 0xFFFF) --- */
+    {
+      volatile uint16_t *fb = (volatile uint16_t *)0x24200000UL;
+      for (uint32_t i = 0; i < w * h; i++) {
+        fb[i] = 0xFFFFU;
+      }
+      __DSB();
+    }
+
+    /* --- 7e) Activer layer 1 + LTDC + rechargement immediat --- */
+    layer->CR = LTDC_LxCR_LEN;
+    ltdc->GCR |= LTDC_GCR_LTDCEN;
+
+    layer->RCR = 0U;              /* PAS de GRMSK ! */
+    __DSB();
+    ltdc->SRCR = LTDC_SRCR_IMR;   /* rechargement immediat */
+    __DSB();
+    while ((ltdc->SRCR & LTDC_SRCR_IMR) != 0U) {}  /* attendre fin reload */
+  }
 
   /* USER CODE END RIF_Init 2 */
 

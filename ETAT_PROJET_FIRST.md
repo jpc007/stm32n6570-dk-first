@@ -1,60 +1,129 @@
 # État du projet « first » — STM32N6570-DK
 
-**Dernière mise à jour : 2026-04-05**
+**Dernière mise à jour : 2026-04-06**
+
+## ÉCRAN LCD ROUGE — FONCTIONNEL ✅
+
+**Dernières évolutions (session du 2026-04-06, soir) :**
+- **LCD ROUGE AFFICHÉ** — après 5+ sessions d'écran noir, l'écran RK050HR18 affiche enfin du rouge. Trace USART complète confirmée :
+  ```
+  === PHASE 1 : FSBL LCD TEST ===
+  [OK] Security_Config
+  [OK] SRAM3+SRAM4 enabled
+  [OK] LTDC clock = 25 MHz
+  [LTDC] HAL_LTDC_Init OK
+  [LTDC] Layer 0 configured
+  [LTDC] Framebuffer filled RED
+  === LCD should show RED ===
+  ```
+- **Stratégie gagnante** : approche **FSBL Secure-only** (pas de TrustZone split). Tout le code LCD tourne en mode Secure dans le FSBL, sans saut vers AppliSecure/AppliNonSecure. Basé sur les exemples officiels ST qui n'utilisent **jamais** TrustZone + LCD ensemble.
+- **Clé du succès** : PLL4 (HSE/4×50=600MHz) → IC16/24 = **25 MHz pixel clock** (identique au BSP), HAL LTDC/RIF/RAMCFG, Security via `HAL_RIF_RIMC` + `HAL_RIF_RISC`, framebuffer en SRAM3 Secure (0x34200000).
+- **Boot via VS Code** : séquence 3 étapes STM32_Programmer_CLI (download ELF → coreReg MSP+PC → start). CubeIDE non utilisé. BOOT1=1-3 (dev mode), flash externe effacée.
+- **LED verte clignote** : boucle infinie confirmée par dump registres (PC dans notre code, SP correcte).
+
+**Évolutions précédentes (sessions 1-8, résumé) :**
+- Sessions 1-4 : init LTDC CMSIS + TrustZone split → toujours noir
+- Session 5 : découverte CFBAR=0 (NS ignoré), fix GRMSK, LTDC init côté Secure
+- Session 6 : FSBL bloqué par `Error_Handler` (MX_xxx_Init), fix 12 `return;`
+- Session 7-8 : LED OK, changement stratégie → Phase 1 FSBL-only → **LCD ROUGE**
 
 Ce document centralise toute la connaissance acquise sur le projet. Il permet à un assistant sans historique de reprendre le travail immédiatement.
 
 ---
 
-## 1. Chaîne de boot (TrustZone Cortex-M55)
+## 1. Architecture actuelle : FSBL Secure-only (Phase 1)
 
-Le STM32N657 intègre TrustZone. Le projet se compose de 3 binaires compilés séparément :
+**Mode actuel** : le projet fonctionne en mode **FSBL-only** (Secure). Pas de saut vers AppliSecure ni AppliNonSecure. Tout le code LCD tourne dans le FSBL.
 
-| Étape | Projet | Adresse VTOR | Rôle |
-|-------|--------|-------------|------|
-| 1 | **first_FSBL** | 0x34180400 | First Stage Bootloader. Init horloges (PLL1 1200 MHz), XSPI, SDMMC, GPIO, mémoires externes. Configure SRAM3/4, RISAF, RIMC, LTDC clocks, GPIO NSEC pour LCD et LEDs. Saute vers AppliSecure à 0x34000400. |
-| 2 | **first_AppliSecure** | 0x34000400 | Monde sécurisé. Init HAL, configure RIFSC (RISUP NSEC pour USART2/LTDC), GPIO pin attributes (NSEC), RISAF4, RIMC LTDC, horloges pixel/APB5, PUBCFGR. Saute vers AppliNonSecure via `NonSecure_Init()`. |
-| 3 | **first_AppliNonSecure** | 0x24100400 | Monde non-sécurisé. Application principale : HAL_Init, GPIO, USART2, LCD power, LTDC GPIO, diagnostics, LVGL init, boucle `lv_timer_handler()` + chenillard LEDs + Hello World série. |
+| Projet | État | Rôle |
+|--------|------|------|
+| **first_FSBL** | **ACTIF — LCD fonctionnel** | Init horloges (PLL1 1200 MHz + PLL4 600 MHz), GPIO, Security (RIMC+RISC), SRAM3/4, LTDC 25 MHz, HAL_LTDC_Init, Layer RGB565, FB RED, LED blink |
+| **first_AppliSecure** | Inactif (pas de jump) | Config TrustZone — sera réactivé en Phase 2 |
+| **first_AppliNonSecure** | Inactif (pas de jump) | Application LVGL — sera réactivé en Phase 2 |
 
-**Comment flasher** : dans STM32CubeIDE, sélectionner le projet **first_FSBL** puis **Run** (ou **Debug**) via `first_FSBL.launch`. Ce lanceur charge les 3 ELF (FSBL + AppliSecure + AppliNonSecure) en une passe.
+### Boot FSBL (Phase 1)
+
+Séquence dans `FSBL/Core/Src/main.c` :
+1. **USER CODE 1** : LED VERTE via CMSIS direct (PD0, avant `HAL_Init`)
+2. `HAL_Init()` → `SystemClock_Config()` (PLL1 + **PLL4**) → `PeriphCommonClock_Config()`
+3. `MX_GPIO_Init()` puis 12 `MX_xxx_Init` (tous avec `return;` en USER CODE Init 0)
+4. **USER CODE 2** :
+   - LED VERTE init HAL (PD0)
+   - `USART2_Init()` (PD5 AF7, 115200)
+   - `Security_Config()` — RIMC (LTDC1/LTDC2 = SEC+PRIV+CID1), RISC (LTDC/L1/L2 = SEC+PRIV)
+   - `SRAM_Enable()` — RAMCFG pour SRAM3+SRAM4 (AXI)
+   - `LTDC_ClockConfig()` — IC16 = PLL4/24 = 25 MHz pixel clock
+   - `LTDC_Init_Phase1()` → `HAL_LTDC_Init()` (appelle `HAL_LTDC_MspInit` : 28 GPIOs + contrôle) → `HAL_LTDC_ConfigLayer` (RGB565 800×480, FB @ 0x34200000) → remplissage RED (0xF800)
+5. Boucle infinie : LED toggle 500ms
+
+### Comment flasher (VS Code / CLI)
+
+**Séquence 3 étapes** avec STM32_Programmer_CLI v2.20.0 :
+```powershell
+# 1. Download ELF (Under Reset)
+STM32_Programmer_CLI -c port=SWD sn=<SN> mode=UR reset=HWrst -d FSBL/Debug/first_FSBL.elf
+
+# 2. Set CPU registers (HotPlug)
+STM32_Programmer_CLI -c port=SWD sn=<SN> mode=HotPlug -coreReg MSP=0x34200000 PC=<entry>
+
+# 3. Start execution (HotPlug)
+STM32_Programmer_CLI -c port=SWD sn=<SN> mode=HotPlug -s
+```
+- `<entry>` = Reset_Handler, obtenu via `arm-none-eabi-objdump -f first_FSBL.elf`
+- `<SN>` = `004200253234511233353533`
+- **Pourquoi 3 étapes** : `-s <addr>` seul ne positionne pas le MSP → le boot ROM reprend la main
+- **BOOT1** doit être en position **1-3** (dev mode, boot ROM halted)
+- Flash externe **effacée** (pas de factory demo)
+
+### Ancienne architecture TrustZone (Phase 2 — à réactiver)
+
+La chaîne FSBL → AppliSecure → AppliNonSecure fonctionnait pour les LEDs et USART2, mais le LCD restait noir en mode TrustZone split. Les écritures NS vers les registres LTDC étaient silencieusement ignorées. Phase 2 réintégrera TrustZone en gardant l'init LTDC côté Secure.
 
 ---
 
 ## 2. TrustZone / RIF — Configuration de sécurité
 
-### 2.1 FSBL (`FSBL/Core/Src/main.c`, USER CODE BEGIN 2)
+### 2.1 Phase 1 actuelle : FSBL Secure-only (`FSBL/Core/Src/main.c`)
 
-Le FSBL effectue la configuration hardware critique **avant** de sauter vers AppliSecure :
+En Phase 1, toute la config sécurité est dans le FSBL, via les API HAL :
 
-- **SRAM3/4** : clocks ON (`RCC->MEMENSR`), sortie shutdown (`RAMCFG_SRAM3/4_AXI_S->CR`, clear `SRAMSD`)
-- **RISAF4** (protège SRAM3+4, NPU port 0) : Region 0, `STARTR=0x24200000`, `ENDR=0x242DFFFF`, `CIDCFGR=0x00FF00FF` (tous CIDs R/W), `CFGR=BREN` (NSEC, NPRIV)
-- **RISAF2** (protège SRAM1) : Region 0, `0x00000000`–`0x000FFFFF` (1 MB), mêmes ouvertures
-- **RIMC** : LTDC L1 (index 10) et L2 (index 11) = CID1, NSEC, NPRIV, MDMA
-- **RISUP (LTDC)** : `RISC_SECCFGRx[3]` bits 6-8 cleared (LTDC/L1/L2 = NSEC+NPRIV)
-- **GPIO NSEC** : PB13 (LCD_CLK), PE1 (LCD_NRST), PG0 (LCD_R0), PQ3 (LCD_ON), PQ6 (LCD_BL)
-- **LTDC clocks** : IC16 = PLL1/45 = 26.67 MHz, CCIPR4 LTDCSEL=IC16, APB5 LTDC enable + reset
-- **PUBCFGR** : AXISRAM3PUB, AXISRAM4PUB, IC16PUB, PERPUB, APB5PUB
-- **Saut** : MSP + jump à `0x34000400` (AppliSecure)
+- **RIMC** (Master attributes) : `HAL_RIF_RIMC_ConfigMasterAttributes` pour LTDC1 et LTDC2 = CID1 + SEC + PRIV
+- **RISC** (Slave attributes) : `HAL_RIF_RISC_SetSlaveSecureAttributes` pour LTDC, LTDC_L1, LTDC_L2 = SEC + PRIV
+- **SRAM3+SRAM4** : `HAL_RAMCFG_EnableAXISRAM` (sort du shutdown, active les clocks)
+- **Pixel clock** : IC16 = PLL4 (600 MHz) / 24 = 25 MHz via `HAL_RCCEx_PeriphCLKConfig`
+- **LTDC** : `HAL_LTDC_Init` + `HAL_LTDC_ConfigLayer` (tout via HAL, pas CMSIS direct)
 
-### 2.2 AppliSecure (`AppliSecure/Core/Src/main.c`, USER CODE RIF_Init 2)
+### 2.2 Phase 2 (à venir) : AppliSecure + AppliNonSecure
 
-AppliSecure redouble certaines configs (ceinture + bretelles) et ajoute :
+Le code TrustZone split reste dans `AppliSecure/Core/Src/main.c` (USER CODE RIF_Init 2) mais n'est plus exécuté en Phase 1. Il contient :
 
 - **RISUP NSEC+NPRIV** : USART2, LTDC, LTDC_L1, LTDC_L2
-- **RIMC** : LTDC1/LTDC2 = CID1, NSEC, NPRIV
+- **RIMC** : LTDC1/LTDC2 = CID1, NSEC, NPRIV (bit 31 MDMA forcé via CMSIS)
 - **GPIO NSEC** : toutes les broches LCD (PA15, PB4, PB13, PE1, PG0 ajoutées manuellement car CubeMX les oublie), les 5 LEDs debug (PD0, PE9, PH5, PE10, PE13), GPIOQ (PQ3, PQ6)
 - **SRAM3/4** : clocks + shutdown (retry si FSBL n'a pas pris effet)
 - **RISAF4** : même config que FSBL (Region 0, ouvert à tous CIDs)
 - **LTDC clocks** : IC16, CCIPR4, APB5, reset (mêmes valeurs que FSBL)
 - **PUBCFGR** : IC16PUB, PERPUB, APB5PUB, AXISRAM3/4PUB
+- **MPU NS** : region 7, 0x24200000 (768 KB), NON_CACHEABLE, OUTER_SHAREABLE, ALL_RW
+- **Section 7 — LTDC FULL INIT FROM SECURE** (ajouté session 2026-04-05 soir) :
+  - GPIO AF14 pour toutes les broches LCD (identique au BSP `LTDC_MspInit`)
+  - Sorties PP : PQ3 (LCD_ON) HIGH, PQ6 (BL) HIGH, PG13 (DE, pull-up) HIGH
+  - PE1 : cycle reset panneau (LOW 2ms → HIGH 120ms via `HAL_Delay`)
+  - LTDC registres via `LTDC_S` / `LTDC_Layer1_S` : timings RK050HR18, layer 1 RGB565, `CFBAR=0x24200000`, `CFBLR`, `CFBLNR`, `CACR=0xFF`, `BFCR` PAxCA
+  - Remplissage FB blanc (`0xFFFF`) via pointeur volatile sur 0x24200000
+  - Enable (`LEN` + `LTDCEN`) + **`SRCR_IMR`** (reload immédiat, **sans GRMSK**)
 - **NonSecure_Init()** : écrit `VTOR_NS = SRAM2_AXI_BASE_NS + 0x400`, positionne MSP_NS, saute vers le Reset_Handler NS
 
 ### 2.3 Points critiques TrustZone (leçons apprises)
 
 - Les registres `RCC->IC16CFGR`, `DIVENSR`, `CCIPR4`, `APB5ENSR` sont **Secure-only** : les écritures NS sont **silencieusement ignorées**.
+- **Les registres LTDC eux-mêmes sont silencieusement ignorés depuis NS** malgré `RISUP NSEC` pour LTDC/L1/L2. Preuve : `LTDC_Layer1_NS->CFBAR` relu = `0x00000000` après écriture de `0x24200000`. **Toute la config LTDC doit se faire depuis Secure** (alias `_S`).
 - PB13 (LCD_CLK) doit être **NSEC** dans AppliSecure, sinon le `HAL_GPIO_Init(AF14)` NS est silencieusement ignoré → pas de pixel clock → écran noir.
 - Le STM32N6 RCC utilise des **SET registers** (`xxxENSR`) pour activer les clocks : écrire dans `xxxENR` directement ne fonctionne **pas**.
 - `RCC_PRIVCFGR5` n'existe pas sur le STM32N6 (PRIVCFGR0..4 uniquement). Seul `PUBCFGR5` existe.
+- Le bit **GRMSK** (bit 2) du registre `LTDC_LxRCR` **masque le reload global** depuis `LTDC_SRCR`. Si GRMSK=1, `SRCR_VBR` et `SRCR_IMR` sont sans effet pour ce layer → les shadow registers ne se chargent jamais → registres actifs (CFBAR etc.) = valeur reset (0).
+- **`RCC->MEMENR` lu depuis NS** retourne 0 si les bits PUBCFGR correspondants ne sont pas positionnés. Le diagnostic `SRAM3 clock OFF` était un **faux négatif**. Ne pas se fier à `RCC_NS->MEMENR` pour vérifier les clocks mémoire depuis le monde NS.
+- **`Error_Handler()` par défaut CubeMX** contient `while(1)`. Dans un FSBL, cela **bloque toute la chaîne de boot** si un seul `MX_xxx_Init` échoue (ex. SDMMC sans carte SD). Solution : rendre `Error_Handler` non-bloquant dans le FSBL + skipper les `MX_xxx_Init` inutiles au boot.
 
 ---
 
@@ -64,7 +133,7 @@ AppliSecure redouble certaines configs (ceinture + bretelles) et ajoute :
 |--------|---------|--------|-------|
 | **ROM** (NS) | 0x24100400 | 511K | Code + constantes AppliNonSecure (SRAM2) |
 | **RAM** (NS) | 0x24180000 | 512K | Data + BSS + heap (4K) + stack (8K) |
-| **FBRAM** | 0x24010000 | 768K | Framebuffer LTDC (section `.framebuffer`, SRAM1) |
+| **FBRAM** | 0x24200000 | 768K | Framebuffer LTDC (section `.framebuffer`, SRAM3) |
 | **Secure ROM** | 0x34000400 | 399K | AppliSecure |
 | **Secure RAM** | 0x34064000 | 624K | AppliSecure data |
 | **FSBL ROM** | 0x34180400 | 255K | FSBL |
@@ -75,7 +144,7 @@ AppliSecure redouble certaines configs (ceinture + bretelles) et ajoute :
 - Region 2 : NSC veneer 0x34001100 – 0x3400117F
 - Region 3 : NS peripherals 0x40000000 – 0x4FFFFFFF
 
-**Note** : le framebuffer a été déplacé de SRAM3 (0x24200000) vers SRAM1 (0x24010000) dans le linker pour éviter les problèmes RISAF4/NPU. Mais la section SAU Region 1 couvre toujours SRAM3/4. Le code `lv_port_disp_ltdc.c` place le buffer via `__attribute__((section(".framebuffer")))` → FBRAM.
+**Note** : le framebuffer est en **SRAM3** (0x24200000). Il avait été temporairement déplacé en SRAM1 (session précédente) mais est revenu en SRAM3 car RISAF4 est correctement ouvert et la SAU Region 1 couvre SRAM3/4. Le code `lv_port_disp_ltdc.c` place le buffer via `__attribute__((section(".framebuffer")))` → FBRAM. Le remplissage initial (blanc) est fait par AppliSecure via pointeur volatile sur 0x24200000.
 
 ---
 
@@ -85,9 +154,9 @@ AppliSecure redouble certaines configs (ceinture + bretelles) et ajoute :
 
 | Élément | Chemin | État |
 |---------|--------|------|
-| Bibliothèque LVGL | `Middlewares/lvgl/` | Copiée depuis `C:\Develop\libs\lvgl` |
-| Config LVGL | `AppliNonSecure/Core/Inc/lv_conf.h` | Configuré : `LV_COLOR_DEPTH 16`, `LV_MEM_SIZE 64K`, `LV_USE_ST_LTDC 0` (LTDC piloté en CMSIS direct), widgets de base activés, démos désactivées |
-| Port display | `AppliNonSecure/GUI/lvgl_port/lv_port_disp_ltdc.c` | Init LTDC CMSIS directe, framebuffer 800×480 RGB565 en section `.framebuffer`, mode partial (20 lignes, double buffer render) |
+| Bibliothèque LVGL | `Middlewares/lvgl/` | **Junction** vers `C:\Develop\libs\lvgl` (créé via `mklink /J`, partagé sans copie) |
+| Config LVGL | `AppliNonSecure/Core/Inc/lv_conf.h` | Configuré : `LV_COLOR_DEPTH 16`, `LV_MEM_SIZE 96K`, `LV_USE_ST_LTDC 0`, widgets BUTTON+LABEL+IMAGE activés, démos désactivées |
+| Port display | `AppliNonSecure/GUI/lvgl_port/lv_port_disp_ltdc.c` | **Ne programme plus le LTDC** (fait par Secure). Crée uniquement le display LVGL, mode partial (20 lignes, double buffer render). Le `disp_flush_cb` écrit dans le framebuffer SRAM3 (0x24200000). |
 | Port tick | `AppliNonSecure/GUI/lvgl_port/lv_port_tick.c` | Exists |
 | Facade | `AppliNonSecure/GUI/lvgl_port/lvgl_port.h` | `lv_port_init()`, `lv_port_tick_inc()` |
 
@@ -106,8 +175,9 @@ AppliSecure redouble certaines configs (ceinture + bretelles) et ajoute :
 ### 4.3 Appels dans main.c (AppliNonSecure)
 
 ```c
-/* Après HAL_Init + MX_GPIO_Init + MX_USART2_UART_Init + LCD power : */
-lv_port_init();  /* → lv_init() + ltdc_hw_init() + lv_display_create() */
+/* LCD/LTDC déjà initialisé par AppliSecure (FB blanc en SRAM3). */
+lv_port_init();  /* → lv_init() + lv_display_create() (PAS de ltdc_hw_init) */
+/* Diagnostic LTDC : lecture CFBAR, GCR, CR, WHPCR + pixels FB */
 
 /* Boucle principale : */
 while(1) {
@@ -116,68 +186,89 @@ while(1) {
 }
 ```
 
-Un bouton "Hello LVGL!" centré est créé dans le code avant la boucle.
+`lv_refr_now()` a été retiré (bloquait le boot). Le `lv_timer_handler()` s'occupe du rendu LVGL.
 
-### 4.4 LTDC init détaillée (`lv_port_disp_ltdc.c`)
+### 4.4 LTDC init détaillée (maintenant dans `AppliSecure/Core/Src/main.c`, section 7)
 
-Le driver LTDC est piloté par registres CMSIS (`LTDC_NS`, `LTDC_Layer1_NS`) car **STM32N6 ne fournit pas de HAL LTDC** (`stm32n6xx_hal_ltdc.c` n'existe pas dans le firmware pack). Points clés :
+Le driver LTDC est piloté par registres CMSIS via les alias **Secure** (`LTDC_S`, `LTDC_Layer1_S`) car :
+1. STM32N6 ne fournit pas de HAL LTDC fonctionnelle (`stm32n6xx_hal_ltdc.c` est un stub vide)
+2. Les écritures NS vers `LTDC_NS` sont **silencieusement ignorées** (voir §2.3)
 
-- **Layer RCR** : utilise le reload per-layer `RCR = IMR | GRMSK (0x05)`. Ne jamais utiliser le reload global `SRCR.IMR` ni effacer GRMSK (provoque la mise à zéro de tous les registres layer).
+Points clés :
+- **RCR = 0** : ne **JAMAIS** mettre **GRMSK** (bit 2). GRMSK masque le reload global (`SRCR`) → les shadow registers ne se chargent pas → registres actifs = valeurs reset (0). C'était la cause du CFBAR=0.
+- **Reload** : utiliser `LTDC_SRCR_IMR` (reload immédiat global), attendre que le HW efface le bit.
 - **CFBLR** : `line_length = width * bytes_per_pixel + 7` (et non +3 comme les anciens STM32).
-- **Séquence** : le LTDC est activé (`GCR |= LTDCEN`) **avant** le reload layer (conforme au HAL ST).
+- **Séquence** : `LEN` → `LTDCEN` → `RCR=0` → `SRCR=IMR` → attente.
+- **Framebuffer** : rempli en blanc (0xFFFF RGB565) par Secure avant enable.
 
 ---
 
-## 5. LCD / LTDC — État et blocage actuel
+## 5. LCD / LTDC — FONCTIONNEL ✅
 
-### 5.1 Symptôme
+### 5.1 État actuel
 
-**L'écran reste noir** malgré de nombreux correctifs appliqués au cours de 4 sessions de debug.
+**L'écran affiche du ROUGE** (RGB565 0xF800) en mode FSBL Secure-only (Phase 1). Confirmé par trace USART et visuellement.
 
-### 5.2 Ce qui fonctionne (confirmé)
+### 5.2 Configuration LTDC fonctionnelle
 
-- Le LTDC **scanne** : le registre CPSR (Current Position Status) change entre deux lectures → le LTDC est actif et parcourt l'image.
-- Le **fond bleu** (BCCR = 0x000000FF, layer 1 désactivé) est **visible** → les signaux LTDC atteignent physiquement le panneau LCD et les GPIOs fonctionnent.
-- Les registres layer relus sont corrects : CR=0x01, WHPCR, WVPCR, PFCR=0x02 (RGB565), CACR=0xFF, CFBAR, CFBLR, CFBLNR = valeurs attendues.
-- Le test SRAM3 W/R passe (write 0xBEEF, read 0xBEEF).
-- Toutes les horloges sont actives (MEMENR, AHB2ENR, AHB3ENR, APB5ENR vérifiés avec diagnostics USART2).
-- Les readbacks GPIO PB13 (AF14), PG13 (OUTPUT HIGH), PE1 (OUTPUT HIGH) sont corrects.
-- RISAF4 IASR = 0 (pas d'accès illégal détecté).
+| Paramètre | Valeur |
+|-----------|--------|
+| Pixel clock | IC16 = PLL4(600MHz) / 24 = **25 MHz** |
+| PLL4 | HSE(48MHz) / 4 × 50 = 600 MHz (ajouté dans `SystemClock_Config`) |
+| Timings | HSYNC=4, HBP=4, HFP=4, VSYNC=4, VBP=4, VFP=4 (BSP V1.0.1) |
+| Polarités | HS_AL, VS_AL, DE_AL, PC_IPC |
+| Format pixel | RGB565 |
+| Framebuffer | 0x34200000 (SRAM3, alias Secure) |
+| Taille FB | 800 × 480 × 2 = 768 000 octets |
+| Init | `HAL_LTDC_Init` + `HAL_LTDC_ConfigLayer` (HAL standard) |
+| GPIO | 28 pins AF14 (SPEED_HIGH) + PE1 reset + PQ3 LCD_ON + PG13 DE (OUTPUT HIGH) + PQ6 backlight |
+| Security | RIMC LTDC1/LTDC2 = CID1+SEC+PRIV, RISC LTDC/L1/L2 = SEC+PRIV |
 
-### 5.3 Causes racines déjà trouvées et corrigées
+### 5.3 Causes racines du black screen (toutes résolues)
 
-| # | Cause | Statut |
-|---|-------|--------|
-| 1 | **PB13 (LCD_CLK) pas NSEC** : CubeMX n'avait pas généré l'attribut NSEC. Le `HAL_GPIO_Init(AF14)` NS était silencieusement ignoré → pas de pixel clock → écran noir. | **Corrigé** dans AppliSecure + FSBL |
-| 2 | **RISAF4 privilege mismatch** : CFGR avait PRIVC1 set (CID1 requiert PRIV), RIMC configure LTDC comme NPRIV → tout accès DMA refusé → pixels noirs. | **Corrigé** : CIDCFGR=0x00FF00FF, CFGR=BREN seul |
-| 3 | **LCD_DE (PG13) en AF14** au lieu de GPIO OUTPUT PP HIGH : le LTDC mettait DE à LOW pendant le blanking → panneau interprétait "display OFF". | **Corrigé** : configuré en GPIO OUTPUT HIGH |
-| 4 | **SRAM3/4 en shutdown** (SRAMSD=1 au reset) : accès = BusFault. | **Corrigé** dans FSBL + AppliSecure |
+| # | Cause | Solution |
+|---|-------|----------|
+| 1 | **TrustZone split** : écritures NS vers LTDC silencieusement ignorées | **Tout l'init LTDC en mode Secure** (FSBL-only, Phase 1) |
+| 2 | **Pixel clock PLL1/45=26.67MHz** au lieu de PLL4/24=25MHz | **PLL4 activé** dans SystemClock_Config, IC16=PLL4/24 |
+| 3 | **PB13 (LCD_CLK) pas NSEC** en mode TrustZone | Non applicable en Phase 1 (tout Secure) |
+| 4 | **RISAF4 privilege mismatch** : LTDC DMA bloqué | Non applicable (HAL RIF SEC+PRIV) |
+| 5 | **LCD_DE (PG13) en AF14** : LTDC mettait DE LOW pendant blanking | **GPIO OUTPUT PP HIGH** (statique) |
+| 6 | **SRAM3/4 en shutdown** (SRAMSD=1 au reset) | `HAL_RAMCFG_EnableAXISRAM` |
+| 7 | **FSBL bloqué par Error_Handler** dans MX_xxx_Init | `Error_Handler = __NOP()` + 12 `return;` |
+| 8 | **GRMSK (bit 2 de LxRCR)** masquait le reload → CFBAR=0 | HAL_LTDC gère le reload correctement |
+| 9 | **Boot mode flash** (BOOT1=1-2) : factory demo écrasait SRAM | **BOOT1=1-3** (dev mode) + flash externe effacée |
+| 10 | **`-s <addr>` seul** ne positionne pas MSP | **Séquence 3 étapes** : download → coreReg → start |
 
-### 5.4 Hypothèses restantes (non résolues — écran toujours noir avec layer ON)
-
-1. **RISAF2 pourrait CASSER l'accès SRAM1** — SRAM1/2 sont peut-être ouverts par défaut (contrairement à SRAM3-6). Ajouter une région RISAF2 pourrait restreindre ce qui était précédemment ouvert. **Hypothèse** : essayer de SUPPRIMER la config RISAF2 du FSBL.
-2. **Framebuffer read-back test** — après remplissage avec 0xF800 (rouge), relire depuis NS. Si 0 → RISAF bloque les lectures NS. Si 0xF800 → c'est le DMA LTDC spécifiquement qui est bloqué.
-3. **RIMC/CID vérification** — vérifier que le CID DMA LTDC correspond effectivement à ce que RISAF2 autorise.
-4. **Alias d'adresse** — LTDC configuré NSEC (RIMC) accède 0x24010000 (alias NS). Si RISAF2 ne filtre que l'alias S (0x34010000), mismatch.
-5. **Pixel clock** : 26.67 MHz (PLL1/45) vs BSP 25 MHz (PLL4/2). Peu probable mais à tester.
-6. **Essayer framebuffer en SRAM2** — RISAF3 est déjà configuré par CubeMX pour NS. Placer le framebuffer en fin de SRAM2 (0x241C0000) où il y a de la place.
-
-### 5.5 Historique des sessions LCD
+### 5.4 Historique des sessions LCD
 
 | Session | Action | Résultat |
 |---------|--------|----------|
-| 1 | Init LTDC basique, framebuffer SRAM3 | Noir |
+| 1 | Init LTDC basique CMSIS, framebuffer SRAM3 | Noir |
 | 2 | Per-layer reload, LCD_DE GPIO, LCD_NRST reset, PCPOL | Noir |
 | 3 | PB13/PE1/PG0 NSEC, RISAF4 open, RIMC LTDC NSEC | **Bleu** (fond) / Noir (layer) |
 | 4 | Déplacement FB vers SRAM1, RISAF2 config | Noir (layer) |
+| 5 | Découverte CFBAR=0 (NS ignoré), fix GRMSK, IMR reload | Noir |
+| 6 | LTDC init complète dans AppliSecure (alias _S) | Noir |
+| 7 | Séquence boot LED, LVGL junction | Noir (build stale) |
+| 8 | FSBL bloqué par Error_Handler → fix 12 MX_xxx_Init | LED OK, LCD non testé |
+| **9** | **Phase 1 FSBL-only : HAL LTDC, PLL4 25MHz, 3-step flash** | **ROUGE ✅** |
 
-**Blocage actuel** : le LTDC output fonctionne (fond bleu visible), mais le DMA LTDC ne parvient pas à lire le framebuffer en SRAM. Le problème est entre RISAF/RIMC et l'accès DMA.
+**Leçon clé** : sur STM32N6, le LCD doit être initialisé **entièrement côté Secure**. Les écritures NS vers LTDC sont silencieusement ignorées, même avec RISUP NSEC. L'approche HAL (pas CMSIS direct) est plus fiable et reproductible.
 
 ---
 
 ## 6. Debug matériel — LEDs
 
-5 LEDs soudées sur une carte de debug externe, initialisées par `DBG_Board_Init()` dans `AppliNonSecure/Core/Src/main.c`.
+### Phase 1 actuelle : une seule LED
+
+En Phase 1 (FSBL-only), seule la LED VERTE (PD0) est utilisée :
+- Allumée via CMSIS direct dans USER CODE 1 (avant `HAL_Init`) — confirme que le FSBL démarre
+- Réinitialisée via HAL dans USER CODE 2
+- **Clignote** en boucle infinie (toggle 500ms) — confirme que tout le code s'exécute
+
+### Phase 2 (à réactiver) : 5 LEDs debug
+
+5 LEDs soudées sur une carte de debug externe :
 
 | Couleur | Port | Pin | Macro |
 |---------|------|-----|-------|
@@ -187,12 +278,16 @@ Le driver LTDC est piloté par registres CMSIS (`LTDC_NS`, `LTDC_Layer1_NS`) car
 | BLEU | GPIOE | PE10 | `DBG_LED_BLUE` |
 | BLANC | GPIOE | PE13 | `DBG_LED_WHITE` |
 
-**Checkpoints de boot** (allumage séquentiel au démarrage) :
-- **VERT** ON = `main()` NS atteint (via CMSIS direct, avant `HAL_Init`)
-- **JAUNE** ON = `HAL_Init()` passé
-- Après init complète : **chenillard** des 5 LEDs (une à la fois, 150 ms par LED)
+**Checkpoints de boot** (séquence visuelle, session 8 — 2026-04-06) :
+- **VERT** ON immédiat = FSBL démarré (PD0, CMSIS direct dans USER CODE 1, **avant** `HAL_Init`). Reste ON pendant toute la séquence FSBL. Puis extinction après delay 500ms dans USER CODE 2 + trace `[1/3 FSBL] LED VERTE`.
+- **JAUNE** ON 500ms = AppliSecure atteint (PE9, trace `[2/3 AppliSecure] LED JAUNE` via CMSIS direct) — puis **OFF**
+- **ROUGE** ON 500ms = AppliSecure phase 2 (PH5, trace `[2/3 AppliSecure] LED ROUGE`) — puis **OFF**
+- **BLANC** ON = AppliNonSecure `main()` atteint (PE13, CMSIS direct avant `HAL_Init`)
+- Après init complète : **chenillard** des 5 LEDs (une à la fois, 150 ms) + trace `[3/3 AppliNonSecure] Chenillard`
 
 Toutes les broches LED sont déclarées **NSEC+NPRIV** dans AppliSecure (USER CODE RIF_Init 2).
+
+**Note USART2 multi-firmware** : FSBL initialise USART2 via `HAL_UART_Init` (HAL_UART compilé dans FSBL). AppliSecure réutilise USART2 via écriture directe CMSIS (`boot_trace_putc` : poll `ISR.TXE_TXFNF`, write `TDR`) car `HAL_UART_MODULE_ENABLED` est commenté dans son `hal_conf.h`. Les registres USART2 persistent entre les jumps.
 
 ---
 
@@ -211,29 +306,27 @@ Toutes les broches LED sont déclarées **NSEC+NPRIV** dans AppliSecure (USER CO
 **Fonctions de debug** :
 - `DBG_Print(const char *s)` — envoie une chaîne via `HAL_UART_Transmit`
 - `DBG_PrintDec(uint32_t v)` — affiche un entier en décimal
+- `DBG_PrintHex32(uint32_t v)` — affiche un entier 32 bits en hexadécimal (0x…)
 
 **TrustZone** : USART2 est ouvert en NSEC+NPRIV via `HAL_RIF_RISC_SetSlaveSecureAttributes(USART2, NSEC|NPRIV)` dans AppliSecure (USER CODE RIF_Init 2).
 
-**Messages de boot typiques** :
+**Messages de boot (Phase 1 — confirmés fonctionnels)** :
 ```
-=== STM32N657 NS BOOT ===
-[1] HAL+GPIO+UART OK
-[2] LCD power...
-[3] LCD power OK
-[4] LTDC GPIO OK
-[4b] GPIO readback: PB13 AF14 OK, PG13 OUTPUT HIGH OK, PE1 OUTPUT HIGH OK
-[5] DIAG START (clocks, RISAF dump, SRAM W/R test, framebuffer fill)
-[6] LVGL init...
-[7] LVGL init OK
-[BG TEST] Layer OFF + BCCR=BLEU... (5s observation)
-Hello World #1, #2, #3...
+=== PHASE 1 : FSBL LCD TEST ===
+[OK] Security_Config
+[OK] SRAM3+SRAM4 enabled
+[OK] LTDC clock = 25 MHz
+[LTDC] HAL_LTDC_Init OK
+[LTDC] Layer 0 configured
+[LTDC] Framebuffer filled RED
+=== LCD should show RED ===
 ```
 
 ---
 
 ## 8. Migration IAR
 
-**Statut** : planifiée, **en attente** que l'écran LCD fonctionne sous CubeIDE.
+**Statut** : planifiée, **en attente** que la Phase 2 (TrustZone + LVGL) fonctionne. La Phase 1 LCD fonctionne sous VS Code + GCC + STM32_Programmer_CLI.
 
 **Motivation** : certification IEC 62304 classe B (MDR 2017/745), compilateur pré-qualifié IEC 61508 SIL 3, meilleur debugger (C-SPY), support TrustZone natif.
 
@@ -257,13 +350,13 @@ Pour un nouvel assistant, lire dans cet ordre :
 | # | Fichier | Pourquoi |
 |---|---------|----------|
 | 1 | `ETAT_PROJET_FIRST.md` | Ce document — vue d'ensemble complète |
-| 2 | `AppliNonSecure/Core/Src/main.c` | Application principale, diagnostics, LVGL init, boucle |
-| 3 | `AppliNonSecure/GUI/lvgl_port/lv_port_disp_ltdc.c` | Driver LTDC CMSIS + LVGL display |
-| 4 | `AppliSecure/Core/Src/main.c` | Config TrustZone (RIFSC, RIMC, GPIO NSEC, clocks) |
-| 5 | `FSBL/Core/Src/main.c` | Boot, SRAM init, RISAF, RIMC, LTDC clocks, saut AppliSecure |
-| 6 | `AppliNonSecure/Core/Inc/lv_conf.h` | Config LVGL |
-| 7 | `AppliNonSecure/STM32N657X0HXQ_LRUN.ld` | Linker : adresses ROM/RAM/FBRAM |
-| 8 | `AppliNonSecure/Core/Inc/main.h` | Defines pins LCD, macros |
+| 2 | `FSBL/Core/Src/main.c` | **Code principal actif** : Phase 1 LCD test, Security, SRAM, LTDC HAL, LED blink |
+| 3 | `FSBL/Core/Inc/stm32n6xx_hal_conf.h` | Modules HAL activés (LTDC, RAMCFG, RIF) |
+| 4 | `FSBL/STM32N657X0HXQ_AXISRAM2_fsbl.ld` | Linker FSBL : ROM=0x34180400, RAM=0x341C0000 |
+| 5 | `.vscode/tasks.json` | Tâches Build + Flash (3-step sequence) |
+| 6 | `AppliSecure/Core/Src/main.c` | Config TrustZone (Phase 2, inactif) |
+| 7 | `AppliNonSecure/Core/Src/main.c` | Application LVGL (Phase 2, inactif) |
+| 8 | `AppliNonSecure/GUI/lvgl_port/lv_port_disp_ltdc.c` | Driver LTDC LVGL (Phase 2, inactif) |
 
 **Autres fichiers .md existants** (contexte historique détaillé, non indispensables si ce document est lu) :
 - `ANALYSE_PROJET_FIRST.md` — structure du projet CubeMX

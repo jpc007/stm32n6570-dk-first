@@ -29,7 +29,7 @@ static void log_line(void (*log)(const char *s), const char *msg)
 
 static void ltdc_reload_shadow(void)
 {
-  LTDC_Layer_TypeDef *ly = LTDC_Layer2_NS;
+  LTDC_Layer_TypeDef *ly = LTDC_Layer1_NS;
   ly->RCR = (1U << 0) | (1U << 2);
   LTDC_NS->SRCR = LTDC_SRCR_VBR;
   __DSB();
@@ -68,7 +68,7 @@ static void fb_fill_stripes(uint16_t c0, uint16_t c1, uint32_t band_h)
 
 static void layer_set_enable(int on)
 {
-  LTDC_Layer_TypeDef *ly = LTDC_Layer2_NS;
+  LTDC_Layer_TypeDef *ly = LTDC_Layer1_NS;
   if (on) {
     ly->CR |= LTDC_LxCR_LEN;
   } else {

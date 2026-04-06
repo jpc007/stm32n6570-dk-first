@@ -23,3 +23,7 @@
 ANALYSE_PROJET_FIRST.md
 DIAGNOSTIC_HARD_FAULT.md
 INTEGRATION_LVGL.md
+
+# Third-party / external libraries (too large for git)
+ThirdParty/
+Middlewares/

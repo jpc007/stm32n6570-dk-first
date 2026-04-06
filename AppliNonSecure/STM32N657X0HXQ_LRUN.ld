@@ -38,8 +38,8 @@ ENTRY(Reset_Handler)
 _estack = ORIGIN(RAM) + LENGTH(RAM); /* end of "RAM" Ram type memory */
 _sstack = _estack - _Min_Stack_Size;
 
-_Min_Heap_Size = 0x1000; /* required amount of heap  (4 KB, LVGL needs more) */
-_Min_Stack_Size = 0x2000; /* required amount of stack (8 KB, LVGL call depth) */
+_Min_Heap_Size = 0x4000; /* 16 KB — malloc libc + marges */
+_Min_Stack_Size = 0x8000; /* 32 KB — lv_init() LVGL 9 + draw SW = profondeur importante */
 
 /* Memories definition */
 MEMORY

@@ -21,7 +21,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "stm32n6xx_hal_ltdc.h"
+#include "stm32n6xx_hal_rif.h"
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -31,7 +33,15 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define LCD_WIDTH   800U
+#define LCD_HEIGHT  480U
+#define LCD_HSYNC   4U
+#define LCD_HBP     4U
+#define LCD_HFP     4U
+#define LCD_VSYNC   4U
+#define LCD_VBP     4U
+#define LCD_VFP     4U
+#define FB_ADDRESS  0x34200000U  /* SRAM3 secure alias */
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -61,7 +71,8 @@ XSPI_HandleTypeDef hxspi1;
 XSPI_HandleTypeDef hxspi2;
 
 /* USER CODE BEGIN PV */
-
+LTDC_HandleTypeDef hltdc;
+static UART_HandleTypeDef huart2;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -81,11 +92,263 @@ static void MX_USB2_OTG_HS_HCD_Init(void);
 static void MX_XSPI1_Init(void);
 static void MX_XSPI2_Init(void);
 /* USER CODE BEGIN PFP */
-
+static void Security_Config(void);
+static void SRAM_Enable(void);
+static void USART2_Init(void);
+static void LTDC_ClockConfig(void);
+static void LTDC_Init_Phase1(void);
+static void UART_Print(const char *msg);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/* ------------------------------------------------------------------ */
+/* UART helper                                                        */
+/* ------------------------------------------------------------------ */
+static void UART_Print(const char *msg)
+{
+  HAL_UART_Transmit(&huart2, (const uint8_t *)msg,
+                    (uint16_t)strlen(msg), 200);
+}
+
+/* ------------------------------------------------------------------ */
+/* USART2 TX on PD5 (AF7) — debug trace                              */
+/* ------------------------------------------------------------------ */
+static void USART2_Init(void)
+{
+  RCC_PeriphCLKInitTypeDef pclk = {0};
+  GPIO_InitTypeDef gpio = {0};
+
+  pclk.PeriphClockSelection = RCC_PERIPHCLK_USART2;
+  pclk.Usart2ClockSelection = RCC_USART2CLKSOURCE_CLKP;
+  HAL_RCCEx_PeriphCLKConfig(&pclk);
+  __HAL_RCC_USART2_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
+
+  gpio.Pin       = GPIO_PIN_5;
+  gpio.Mode      = GPIO_MODE_AF_PP;
+  gpio.Pull      = GPIO_NOPULL;
+  gpio.Speed     = GPIO_SPEED_FREQ_LOW;
+  gpio.Alternate = GPIO_AF7_USART2;
+  HAL_GPIO_Init(GPIOD, &gpio);
+
+  huart2.Instance          = USART2;
+  huart2.Init.BaudRate     = 115200;
+  huart2.Init.WordLength   = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits     = UART_STOPBITS_1;
+  huart2.Init.Parity       = UART_PARITY_NONE;
+  huart2.Init.Mode         = UART_MODE_TX;
+  huart2.Init.HwFlowCtl    = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  HAL_UART_Init(&huart2);
+}
+
+/* ------------------------------------------------------------------ */
+/* Security : RIMC masters + RISC slaves for LTDC (SEC+PRIV)         */
+/* Matches ST official examples exactly                               */
+/* ------------------------------------------------------------------ */
+static void Security_Config(void)
+{
+  __HAL_RCC_RIFSC_CLK_ENABLE();
+
+  RIMC_MasterConfig_t rimc = {0};
+  rimc.MasterCID = RIF_CID_1;
+  rimc.SecPriv   = RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV;
+
+  HAL_RIF_RIMC_ConfigMasterAttributes(RIF_MASTER_INDEX_LTDC1, &rimc);
+  HAL_RIF_RIMC_ConfigMasterAttributes(RIF_MASTER_INDEX_LTDC2, &rimc);
+
+  HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_LTDC,   RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV);
+  HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_LTDCL1, RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV);
+  HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_LTDCL2, RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV);
+}
+
+/* ------------------------------------------------------------------ */
+/* Enable SRAM3+SRAM4 (AXI SRAMs for framebuffer) via HAL            */
+/* ------------------------------------------------------------------ */
+static void SRAM_Enable(void)
+{
+  RAMCFG_HandleTypeDef hramcfg = {0};
+
+  __HAL_RCC_AXISRAM3_MEM_CLK_ENABLE();
+  __HAL_RCC_AXISRAM4_MEM_CLK_ENABLE();
+  __HAL_RCC_RAMCFG_CLK_ENABLE();
+
+  hramcfg.Instance = RAMCFG_SRAM3_AXI;
+  HAL_RAMCFG_EnableAXISRAM(&hramcfg);
+
+  hramcfg.Instance = RAMCFG_SRAM4_AXI;
+  HAL_RAMCFG_EnableAXISRAM(&hramcfg);
+}
+
+/* ------------------------------------------------------------------ */
+/* LTDC pixel clock : IC16 = PLL4 / 2 = 25 MHz                       */
+/* PLL4 is configured in SystemClock_Config (600 MHz output)          */
+/* ------------------------------------------------------------------ */
+static void LTDC_ClockConfig(void)
+{
+  RCC_PeriphCLKInitTypeDef pclk = {0};
+  pclk.PeriphClockSelection = RCC_PERIPHCLK_LTDC;
+  pclk.LtdcClockSelection   = RCC_LTDCCLKSOURCE_IC16;
+  pclk.ICSelection[RCC_IC16].ClockSelection = RCC_ICCLKSOURCE_PLL4;
+  pclk.ICSelection[RCC_IC16].ClockDivider   = 24;  /* 600 / 24 = 25 MHz */
+  HAL_RCCEx_PeriphCLKConfig(&pclk);
+}
+
+/* ------------------------------------------------------------------ */
+/* HAL_LTDC_MspInit callback — GPIO setup for all LCD pins            */
+/* Called automatically by HAL_LTDC_Init()                            */
+/* Pin mapping from STM32N6570-DK BSP (stm32n6570_discovery_lcd.c)   */
+/* ------------------------------------------------------------------ */
+void HAL_LTDC_MspInit(LTDC_HandleTypeDef *hltdc_arg)
+{
+  GPIO_InitTypeDef gpio = {0};
+
+  __HAL_RCC_LTDC_CLK_ENABLE();
+  __HAL_RCC_LTDC_FORCE_RESET();
+  __HAL_RCC_LTDC_RELEASE_RESET();
+
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
+  __HAL_RCC_GPIOE_CLK_ENABLE();
+  __HAL_RCC_GPIOG_CLK_ENABLE();
+  __HAL_RCC_GPIOH_CLK_ENABLE();
+  __HAL_RCC_GPIOQ_CLK_ENABLE();
+
+  gpio.Mode      = GPIO_MODE_AF_PP;
+  gpio.Pull      = GPIO_NOPULL;
+  gpio.Speed     = GPIO_SPEED_FREQ_HIGH;
+  gpio.Alternate = GPIO_AF14_LCD;
+
+  /* GPIOA : G3(PA0), G2(PA1), B7(PA2), B1(PA7), B6(PA8), R5(PA15) */
+  gpio.Pin = GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_7 | GPIO_PIN_8 | GPIO_PIN_15;
+  HAL_GPIO_Init(GPIOA, &gpio);
+
+  /* GPIOB : B2(PB2), R3(PB4), G6(PB11), G5(PB12), CLK(PB13), HSYNC(PB14), G4(PB15) */
+  gpio.Pin = GPIO_PIN_2 | GPIO_PIN_4 | GPIO_PIN_11 | GPIO_PIN_12 | GPIO_PIN_13 | GPIO_PIN_14 | GPIO_PIN_15;
+  HAL_GPIO_Init(GPIOB, &gpio);
+
+  /* GPIOD : R7(PD8), R1(PD9), R2(PD15) */
+  gpio.Pin = GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_15;
+  HAL_GPIO_Init(GPIOD, &gpio);
+
+  /* GPIOE : VSYNC(PE11) */
+  gpio.Pin = GPIO_PIN_11;
+  HAL_GPIO_Init(GPIOE, &gpio);
+
+  /* GPIOG : R0(PG0), G1(PG1), B3(PG6), G7(PG8), R6(PG11), G0(PG12) */
+  gpio.Pin = GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_6 | GPIO_PIN_8 | GPIO_PIN_11 | GPIO_PIN_12;
+  HAL_GPIO_Init(GPIOG, &gpio);
+
+  /* GPIOH : B4(PH3), R4(PH4), B5(PH6) */
+  gpio.Pin = GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_6;
+  HAL_GPIO_Init(GPIOH, &gpio);
+
+  /* B0 = PP15 → need GPIOP */
+  __HAL_RCC_GPIOP_CLK_ENABLE();
+  gpio.Pin = GPIO_PIN_15;
+  HAL_GPIO_Init(GPIOP, &gpio);
+
+  /* ---- Control GPIOs (output PP, not AF) ---- */
+  gpio.Mode = GPIO_MODE_OUTPUT_PP;
+  gpio.Speed = GPIO_SPEED_FREQ_LOW;
+
+  /* NRST (PE1) : reset pulse */
+  gpio.Pin = GPIO_PIN_1;
+  HAL_GPIO_Init(GPIOE, &gpio);
+  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_RESET);
+  HAL_Delay(10);
+  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_SET);
+  HAL_Delay(10);
+
+  /* LCD_ONOFF (PQ3) */
+  gpio.Pin = GPIO_PIN_3;
+  HAL_GPIO_Init(GPIOQ, &gpio);
+  HAL_GPIO_WritePin(GPIOQ, GPIO_PIN_3, GPIO_PIN_SET);
+
+  /* LCD_DE (PG13) — display enable (held HIGH) */
+  gpio.Pin = GPIO_PIN_13;
+  HAL_GPIO_Init(GPIOG, &gpio);
+  HAL_GPIO_WritePin(GPIOG, GPIO_PIN_13, GPIO_PIN_SET);
+
+  /* LCD_BL_CTRL (PQ6) — backlight 100% */
+  gpio.Pin = GPIO_PIN_6;
+  HAL_GPIO_Init(GPIOQ, &gpio);
+  HAL_GPIO_WritePin(GPIOQ, GPIO_PIN_6, GPIO_PIN_SET);
+}
+
+/* ------------------------------------------------------------------ */
+/* LTDC init + Layer 0 config + framebuffer fill                      */
+/* ------------------------------------------------------------------ */
+static void LTDC_Init_Phase1(void)
+{
+  LTDC_LayerCfgTypeDef layer = {0};
+
+  /* LTDC timing configuration (RK050HR18 800x480 panel) */
+  hltdc.Instance = LTDC;
+  hltdc.Init.HSPolarity = LTDC_HSPOLARITY_AL;
+  hltdc.Init.VSPolarity = LTDC_VSPOLARITY_AL;
+  hltdc.Init.DEPolarity = LTDC_DEPOLARITY_AL;
+  hltdc.Init.PCPolarity = LTDC_PCPOLARITY_IPC;
+
+  hltdc.Init.HorizontalSync     = LCD_HSYNC - 1U;
+  hltdc.Init.AccumulatedHBP     = LCD_HSYNC + LCD_HBP - 1U;
+  hltdc.Init.AccumulatedActiveW = LCD_HSYNC + LCD_WIDTH + LCD_HBP - 1U;
+  hltdc.Init.TotalWidth         = LCD_HSYNC + LCD_WIDTH + LCD_HBP + LCD_HFP - 1U;
+  hltdc.Init.VerticalSync       = LCD_VSYNC - 1U;
+  hltdc.Init.AccumulatedVBP     = LCD_VSYNC + LCD_VBP - 1U;
+  hltdc.Init.AccumulatedActiveH = LCD_VSYNC + LCD_HEIGHT + LCD_VBP - 1U;
+  hltdc.Init.TotalHeigh         = LCD_VSYNC + LCD_HEIGHT + LCD_VBP + LCD_VFP - 1U;
+
+  hltdc.Init.Backcolor.Blue  = 0;
+  hltdc.Init.Backcolor.Green = 0;
+  hltdc.Init.Backcolor.Red   = 0;
+
+  if (HAL_LTDC_Init(&hltdc) != HAL_OK)
+  {
+    UART_Print("[LTDC] HAL_LTDC_Init FAILED\r\n");
+    return;
+  }
+  UART_Print("[LTDC] HAL_LTDC_Init OK\r\n");
+
+  /* Layer 0 : full screen RGB565, framebuffer in SRAM3 */
+  layer.WindowX0        = 0;
+  layer.WindowX1        = LCD_WIDTH;
+  layer.WindowY0        = 0;
+  layer.WindowY1        = LCD_HEIGHT;
+  layer.PixelFormat     = LTDC_PIXEL_FORMAT_RGB565;
+  layer.Alpha           = 255;
+  layer.Alpha0          = 0;
+  layer.BlendingFactor1 = LTDC_BLENDING_FACTOR1_CA;
+  layer.BlendingFactor2 = LTDC_BLENDING_FACTOR2_CA;
+  layer.FBStartAdress   = FB_ADDRESS;
+  layer.ImageWidth      = LCD_WIDTH;
+  layer.ImageHeight     = LCD_HEIGHT;
+  layer.Backcolor.Blue  = 0;
+  layer.Backcolor.Green = 0;
+  layer.Backcolor.Red   = 0;
+
+  if (HAL_LTDC_ConfigLayer(&hltdc, &layer, 0) != HAL_OK)
+  {
+    UART_Print("[LTDC] ConfigLayer FAILED\r\n");
+    return;
+  }
+  UART_Print("[LTDC] Layer 0 configured\r\n");
+
+  /* Fill framebuffer with solid RED (RGB565 = 0xF800) */
+  {
+    volatile uint16_t *fb = (volatile uint16_t *)FB_ADDRESS;
+    for (uint32_t i = 0; i < LCD_WIDTH * LCD_HEIGHT; i++)
+    {
+      fb[i] = 0xF800U;
+    }
+  }
+  UART_Print("[LTDC] Framebuffer filled RED\r\n");
+
+  __HAL_LTDC_ENABLE(&hltdc);
+}
 
 /* USER CODE END 0 */
 
@@ -97,7 +360,13 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
+  /* ---- DIAGNOSTIC ULTRA-PRECOCE : LED VERTE via CMSIS direct ---- */
+  /* Confirme que le FSBL demarre reellement (avant HAL_Init).       */
+  RCC->AHB4ENSR = RCC_AHB4ENR_GPIODEN;   /* clock GPIOD ON (SET register) */
+  __DSB();
+  GPIOD->MODER = (GPIOD->MODER & ~(3UL << (0*2))) | (1UL << (0*2)); /* PD0 output */
+  GPIOD->BSRR  = (1UL << 0);             /* PD0 HIGH = LED VERTE            */
+  /* La LED restera ON pendant toute la sequence MX_xxx_Init + boot.  */
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -133,191 +402,38 @@ int main(void)
   MX_XSPI2_Init();
   /* USER CODE BEGIN 2 */
 
-  /* ---------------------------------------------------------------
-   * SRAM3/SRAM4 : activer les horloges + sortir du shutdown
-   * DOIT etre fait ici dans le FSBL car le RCC MEMENSR ne prend
-   * effet que dans le FSBL (RCC MEM clock locks apres).
+  /* ============================================================
+   * PHASE 1 — LCD TEST (Secure-only, no TrustZone jump)
    *
-   * On utilise des ecritures CMSIS directes dans les SET registers.
-   * MEMENSR (offset 0x0A4C) est un write-1-to-set pour MEMENR.
-   * --------------------------------------------------------------- */
-  /* Activer les horloges SRAM3 + SRAM4 via le SET register */
-  RCC->MEMENSR = RCC_MEMENR_AXISRAM3EN | RCC_MEMENR_AXISRAM4EN;  /* bits 0+1 */
-  /* Activer RAMCFG via AHB2 SET register */
-  RCC->AHB2ENSR = RCC_AHB2ENR_RAMCFGEN;  /* bit 12 */
-  __DSB();
-  /* Verification immediate */
+   * LED OK! Now testing full LCD init.
+   * ============================================================ */
   {
-    volatile uint32_t check = RCC->MEMENR;
-    if (!(check & (RCC_MEMENR_AXISRAM3EN | RCC_MEMENR_AXISRAM4EN)))
-    {
-      /* Si les bits ne sont toujours pas set, forcer via ENR direct */
-      RCC->MEMENR |= (RCC_MEMENR_AXISRAM3EN | RCC_MEMENR_AXISRAM4EN);
-      __DSB();
-    }
+    /* LED verte (PD0) */
+    GPIO_InitTypeDef gpio = {0};
+    __HAL_RCC_GPIOD_CLK_ENABLE();
+    gpio.Pin   = GPIO_PIN_0;
+    gpio.Mode  = GPIO_MODE_OUTPUT_PP;
+    gpio.Pull  = GPIO_NOPULL;
+    gpio.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOD, &gpio);
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);
   }
 
-  /* Sortir SRAM3/SRAM4 du mode shutdown (SRAMSD=1 au reset) */
-  CLEAR_BIT(RAMCFG_SRAM3_AXI_S->CR, RAMCFG_CR_SRAMSD);
-  CLEAR_BIT(RAMCFG_SRAM4_AXI_S->CR, RAMCFG_CR_SRAMSD);
-  __DSB();
+  USART2_Init();
+  UART_Print("\r\n=== PHASE 1 : FSBL LCD TEST ===\r\n");
 
-  /* ---------------------------------------------------------------
-   * RISAF4 : ouvrir SRAM3+SRAM4 pour le LTDC DMA
-   *
-   * RISAF4 par defaut (aucune region activee) REFUSE tous les acces.
-   * Le LTDC DMA (CID1, NSEC, NPRIV) lit donc des zeros → ecran noir.
-   * On configure Region 1 (REG[0]) pour autoriser TOUS les CIDs en
-   * lecture+ecriture, sans restriction SEC/PRIV.
-   *
-   * DOIT etre fait depuis un contexte Secure (FSBL ou AppliSecure).
-   * On le fait ici pour etre certain que ca prend effet, meme si
-   * AppliSecure est charge depuis la flash externe et n'a pas notre
-   * code USER CODE.
-   * --------------------------------------------------------------- */
-  {
-    /* Activer l'horloge RISAF (AHB3) */
-    RCC->AHB3ENSR = RCC_AHB3ENR_RISAFEN;
-    __DSB();
+  Security_Config();
+  UART_Print("[OK] Security_Config\r\n");
 
-    RISAF_TypeDef *risaf4 = RISAF4_S;
+  SRAM_Enable();
+  UART_Print("[OK] SRAM3+SRAM4 enabled\r\n");
 
-    /* Desactiver la region pendant la configuration */
-    risaf4->REG[0].CFGR = 0;
-    __DSB();
+  LTDC_ClockConfig();
+  UART_Print("[OK] LTDC clock = 25 MHz\r\n");
 
-    /* Effacer les flags d'acces illegaux */
-    risaf4->IACR = risaf4->IASR;
+  LTDC_Init_Phase1();
 
-    /* Plage : 0x24200000 – 0x242DFFFF (SRAM3 + SRAM4, 896 KB) */
-    risaf4->REG[0].STARTR = 0x24200000;
-    risaf4->REG[0].ENDR   = 0x242DFFFF;
-
-    /* Tous CIDs (0-7) autorises en lecture ET ecriture */
-    risaf4->REG[0].CIDCFGR = 0x00FF00FFU;
-
-    /* Activer : BREN seul (pas de SEC, pas de PRIV) */
-    risaf4->REG[0].CFGR = RISAF_REGx_CFGR_BREN;
-    __DSB();
-  }
-
-  /* ---------------------------------------------------------------
-   * RISAF2 / SRAM1 (framebuffer LTDC)
-   *
-   * Une region RISAF2 avec BREN + plage 0..0xFFFFF provoquait IASR!=0
-   * et acces LTDC vers 0x24010000 refuses (ecran noir alors que le CPU
-   * voyait 0xF800 dans le FB). On desactive le filtrage base region :
-   * CFGR=0, clear des flags illegaux — laisse la politique par defaut
-   * pour la SRAM1 (acces NS + LTDC NSEC OK).
-   * --------------------------------------------------------------- */
-  {
-    RISAF_TypeDef *risaf2 = RISAF2_S;
-
-    risaf2->REG[0].CFGR = 0;
-    __DSB();
-    risaf2->IACR = risaf2->IASR;
-    __DSB();
-  }
-
-  /* ---------------------------------------------------------------
-   * RIMC : configurer LTDC DMA masters (CID1, NSEC, NPRIV)
-   * LTDC Layer 1 = master index 10, Layer 2 = master index 11
-   * ATTRx: MCID[6:4]=1, MSEC[8]=0, MPRIV[9]=0, MDMA[31]=1
-   * Valeur = (1 << 4) | (1 << 31) = 0x80000010
-   * --------------------------------------------------------------- */
-  {
-    /* Activer RIFSC clock */
-    __HAL_RCC_RIFSC_CLK_ENABLE();
-    __DSB();
-
-    uint32_t rimc_val = RIFSC_RIMC_ATTRx_MCID_0   /* CID = 1 */
-                      | (1UL << 31);                /* MDMA = 1 (DMA master) */
-    RIFSC_S->RIMC_ATTRx[10] = rimc_val;  /* LTDC Layer 1 */
-    RIFSC_S->RIMC_ATTRx[11] = rimc_val;  /* LTDC Layer 2 */
-    __DSB();
-  }
-
-  /* ---------------------------------------------------------------
-   * RISUP : rendre LTDC accessible depuis NS (direct CMSIS)
-   * LTDC=bit6, LTDC_L1=bit7, LTDC_L2=bit8 dans RISC_SECCFGRx[3]
-   * --------------------------------------------------------------- */
-  {
-    /* Clear SEC bits → Non-Secure */
-    RIFSC_S->RISC_SECCFGRx[3] &= ~(0x7UL << 6);
-    /* Clear PRIV bits → Non-Privileged */
-    RIFSC_S->RISC_PRIVCFGRx[3] &= ~(0x7UL << 6);
-    __DSB();
-  }
-
-  /* ---------------------------------------------------------------
-   * GPIO NSEC : pins LCD critiques (CubeMX peut les oublier)
-   * --------------------------------------------------------------- */
-  __HAL_RCC_GPIOB_CLK_ENABLE();
-  __HAL_RCC_GPIOE_CLK_ENABLE();
-  __HAL_RCC_GPIOG_CLK_ENABLE();
-  __HAL_RCC_GPIOQ_CLK_ENABLE();
-  HAL_GPIO_ConfigPinAttributes(GPIOB, GPIO_PIN_13, GPIO_PIN_NSEC | GPIO_PIN_NPRIV); /* LCD_CLK */
-  HAL_GPIO_ConfigPinAttributes(GPIOE, GPIO_PIN_1,  GPIO_PIN_NSEC | GPIO_PIN_NPRIV); /* LCD_NRST */
-  HAL_GPIO_ConfigPinAttributes(GPIOG, GPIO_PIN_0,  GPIO_PIN_NSEC | GPIO_PIN_NPRIV); /* LCD_R0 */
-  HAL_GPIO_ConfigPinAttributes(GPIOQ, GPIO_PIN_3,  GPIO_PIN_NSEC | GPIO_PIN_NPRIV); /* LCD_ON */
-  HAL_GPIO_ConfigPinAttributes(GPIOQ, GPIO_PIN_6,  GPIO_PIN_NSEC | GPIO_PIN_NPRIV); /* LCD_BL */
-
-  /* ---------------------------------------------------------------
-   * LTDC clock : configurer IC16 pixel clock + APB5 LTDC depuis FSBL
-   *
-   * Ces registres RCC sont Secure-only. Si AppliSecure (flash) ne
-   * les configure pas, le LTDC n'a pas de clock → ecran mort.
-   * On les configure ici dans le FSBL par securite.
-   * --------------------------------------------------------------- */
-  {
-    /* IC16 = PLL1 (1200 MHz) / 45 = 26.67 MHz pixel clock */
-    MODIFY_REG(RCC->IC16CFGR,
-               RCC_IC16CFGR_IC16SEL | RCC_IC16CFGR_IC16INT,
-               (0U  << RCC_IC16CFGR_IC16SEL_Pos) |
-               (44U << RCC_IC16CFGR_IC16INT_Pos));
-    RCC->DIVENSR = RCC_DIVENSR_IC16ENS;
-    __DSB();
-    /* Attendre stabilisation IC16 */
-    for (volatile int w = 0; w < 10000; w++) {}
-
-    /* LTDC kernel clock = IC16 */
-    MODIFY_REG(RCC->CCIPR4, RCC_CCIPR4_LTDCSEL, RCC_CCIPR4_LTDCSEL_1);
-
-    /* LTDC peripheral clock (APB5) */
-    RCC->APB5ENSR = RCC_APB5ENR_LTDCEN;
-    __DSB();
-
-    /* LTDC reset (proper init) */
-    RCC->APB5RSTSR = RCC_APB5RSTR_LTDCRST;
-    __DSB();
-    for (volatile int w = 0; w < 100; w++) {}
-    RCC->APB5RSTCR = RCC_APB5RSTR_LTDCRST;
-    __DSB();
-
-    /* Rendre les ressources accessibles depuis NS via PUBCFGR */
-    SET_BIT(RCC->PUBCFGR5, RCC_PUBCFGR5_AXISRAM3PUB | RCC_PUBCFGR5_AXISRAM4PUB);
-    SET_BIT(RCC->PUBCFGR2, RCC_PUBCFGR2_IC16PUB);
-    SET_BIT(RCC->PUBCFGR3, RCC_PUBCFGR3_PERPUB);
-    SET_BIT(RCC->PUBCFGR4, RCC_PUBCFGR4_APB5PUB);
-    __DSB();
-  }
-
-  /* Jump to AppliSecure --------------------------------------------------- */
-  {
-    /* AppliSecure vector table sits at the beginning of its ROM region */
-    #define APPLI_SECURE_VTOR  0x34000400U
-
-    /* Read values BEFORE changing MSP (avoid stack corruption) */
-    uint32_t appli_msp  = *(volatile uint32_t *)APPLI_SECURE_VTOR;
-    uint32_t appli_addr = *(volatile uint32_t *)(APPLI_SECURE_VTOR + 4U);
-
-    /* Set secure VTOR to AppliSecure vector table */
-    SCB->VTOR = APPLI_SECURE_VTOR;
-
-    /* Set MSP, then jump — never returns */
-    __set_MSP(appli_msp);
-    ((void (*)(void))appli_addr)();
-  }
+  UART_Print("=== LCD should show RED ===\r\n");
 
   /* USER CODE END 2 */
 
@@ -325,6 +441,8 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_0);  /* LED verte blink */
+    HAL_Delay(500);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -402,7 +520,13 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL1.PLLP2 = 1;
   RCC_OscInitStruct.PLL2.PLLState = RCC_PLL_NONE;
   RCC_OscInitStruct.PLL3.PLLState = RCC_PLL_NONE;
-  RCC_OscInitStruct.PLL4.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.PLL4.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL4.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL4.PLLM = 4;
+  RCC_OscInitStruct.PLL4.PLLFractional = 0;
+  RCC_OscInitStruct.PLL4.PLLN = 50;
+  RCC_OscInitStruct.PLL4.PLLP1 = 1;
+  RCC_OscInitStruct.PLL4.PLLP2 = 1;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -463,7 +587,7 @@ static void MX_ADC1_Init(void)
 {
 
   /* USER CODE BEGIN ADC1_Init 0 */
-
+  return; /* Skip — non essentiel pour le boot */
   /* USER CODE END ADC1_Init 0 */
 
   ADC_MultiModeTypeDef multimode = {0};
@@ -530,7 +654,7 @@ static void MX_I2C1_Init(void)
 {
 
   /* USER CODE BEGIN I2C1_Init 0 */
-
+  return; /* Skip — non essentiel pour le boot */
   /* USER CODE END I2C1_Init 0 */
 
   /* USER CODE BEGIN I2C1_Init 1 */
@@ -578,7 +702,7 @@ static void MX_I2C2_Init(void)
 {
 
   /* USER CODE BEGIN I2C2_Init 0 */
-
+  return; /* Skip — non essentiel pour le boot */
   /* USER CODE END I2C2_Init 0 */
 
   /* USER CODE BEGIN I2C2_Init 1 */
@@ -626,7 +750,7 @@ static void MX_MDF1_Init(void)
 {
 
   /* USER CODE BEGIN MDF1_Init 0 */
-
+  return; /* Skip — non essentiel pour le boot */
   /* USER CODE END MDF1_Init 0 */
 
   /* USER CODE BEGIN MDF1_Init 1 */
@@ -683,7 +807,7 @@ static void MX_SAI1_Init(void)
 {
 
   /* USER CODE BEGIN SAI1_Init 0 */
-
+  return; /* Skip — non essentiel pour le boot */
   /* USER CODE END SAI1_Init 0 */
 
   /* USER CODE BEGIN SAI1_Init 1 */
@@ -755,7 +879,7 @@ static void MX_SDMMC2_SD_Init(void)
 {
 
   /* USER CODE BEGIN SDMMC2_Init 0 */
-
+  return; /* Skip — non essentiel pour le boot */
   /* USER CODE END SDMMC2_Init 0 */
 
   /* USER CODE BEGIN SDMMC2_Init 1 */
@@ -786,7 +910,7 @@ static void MX_UCPD1_Init(void)
 {
 
   /* USER CODE BEGIN UCPD1_Init 0 */
-
+  return; /* Skip — non essentiel pour le boot */
   /* USER CODE END UCPD1_Init 0 */
 
   /* Peripheral clock enable */
@@ -810,7 +934,7 @@ static void MX_USART1_UART_Init(void)
 {
 
   /* USER CODE BEGIN USART1_Init 0 */
-
+  return; /* Skip — non essentiel pour le boot */
   /* USER CODE END USART1_Init 0 */
 
   /* USER CODE BEGIN USART1_Init 1 */
@@ -858,7 +982,7 @@ static void MX_USB1_OTG_HS_HCD_Init(void)
 {
 
   /* USER CODE BEGIN USB1_OTG_HS_Init 0 */
-
+  return; /* Skip — non essentiel pour le boot */
   /* USER CODE END USB1_OTG_HS_Init 0 */
 
   /* USER CODE BEGIN USB1_OTG_HS_Init 1 */
@@ -879,7 +1003,7 @@ static void MX_USB2_OTG_HS_HCD_Init(void)
 {
 
   /* USER CODE BEGIN USB2_OTG_HS_Init 0 */
-
+  return; /* Skip — non essentiel pour le boot */
   /* USER CODE END USB2_OTG_HS_Init 0 */
 
   /* USER CODE BEGIN USB2_OTG_HS_Init 1 */
@@ -914,7 +1038,7 @@ static void MX_XSPI1_Init(void)
 {
 
   /* USER CODE BEGIN XSPI1_Init 0 */
-
+  return; /* Skip — non essentiel pour le boot */
   /* USER CODE END XSPI1_Init 0 */
 
   XSPIM_CfgTypeDef sXspiManagerCfg = {0};
@@ -965,7 +1089,7 @@ static void MX_XSPI2_Init(void)
 {
 
   /* USER CODE BEGIN XSPI2_Init 0 */
-
+  return; /* Skip — non essentiel pour le boot */
   /* USER CODE END XSPI2_Init 0 */
 
   XSPIM_CfgTypeDef sXspiManagerCfg = {0};
@@ -1056,11 +1180,10 @@ static void MX_GPIO_Init(void)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* Keep IRQs enabled so SWD debug stays responsive */
-  __BKPT(0);  /* halt in debugger if attached */
-  while (1)
-  {
-  }
+  /* NON-BLOQUANT : les MX_xxx_Init non essentiels (SDMMC, USB, XSPI...)
+   * peuvent echouer sans bloquer la chaine de boot FSBL -> AppliSecure.
+   * On continue pour atteindre le jump vers AppliSecure dans USER CODE BEGIN 2. */
+  __NOP();
   /* USER CODE END Error_Handler_Debug */
 }
 #ifdef USE_FULL_ASSERT

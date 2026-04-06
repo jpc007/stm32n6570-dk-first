@@ -24,6 +24,7 @@ COMMON_CFLAGS := \
   -I../../Middlewares/lvgl \
   -I../../Middlewares/lvgl/src \
   -I../GUI/lvgl_port \
+  -I../../ThirdParty/Components/rk050hr18 \
   -O0 -ffunction-sections -fdata-sections -Wall \
   -fstack-usage -fcyclomatic-complexity \
   --specs=nano.specs -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb

@@ -60,6 +60,7 @@
 									<listOptionValue builtIn="false" value="../../Middlewares/lvgl"/>
 									<listOptionValue builtIn="false" value="../../Middlewares/lvgl/src"/>
 									<listOptionValue builtIn="false" value="../GUI/lvgl_port"/>
+									<listOptionValue builtIn="false" value="../../ThirdParty/Components/rk050hr18"/>
 								</option>
 								<inputType id="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c.1863410995" superClass="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c"/>
 							</tool>
@@ -157,6 +158,7 @@
 									<listOptionValue builtIn="false" value="../../Middlewares/lvgl"/>
 									<listOptionValue builtIn="false" value="../../Middlewares/lvgl/src"/>
 									<listOptionValue builtIn="false" value="../GUI/lvgl_port"/>
+									<listOptionValue builtIn="false" value="../../ThirdParty/Components/rk050hr18"/>
 								</option>
 								<inputType id="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c.2093043153" superClass="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c"/>
 							</tool>

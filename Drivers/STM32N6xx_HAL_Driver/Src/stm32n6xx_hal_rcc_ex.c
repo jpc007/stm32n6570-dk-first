@@ -22,6 +22,7 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "stm32n6xx_hal.h"
+#include <math.h> /* for float_t used in RCCEx_CalcPLLFreq */
 
 /** @addtogroup STM32N6xx_HAL_Driver
   * @{
@@ -3350,12 +3351,12 @@ static uint32_t RCCEx_GetPLLSourceFreq(uint32_t PLLsource)
 static uint32_t RCCEx_CalcPLLFreq(uint32_t PLLInputFreq, uint32_t M, uint32_t N, uint32_t FRACN, uint32_t P1,
                                   uint32_t P2)
 {
-  float_t freq;
+  float freq;
 
-  freq = ((float_t)PLLInputFreq * ((float_t)N + ((float_t)FRACN / (float_t)0x1000000))) / (float_t)M;
+  freq = ((float)PLLInputFreq * ((float)N + ((float)FRACN / (float)0x1000000))) / (float)M;
 
-  freq = freq / (float_t)P1;
-  freq = freq / (float_t)P2;
+  freq = freq / (float)P1;
+  freq = freq / (float)P2;
 
   return (uint32_t)freq;
 }
