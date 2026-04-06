@@ -1,10 +1,18 @@
 # État du projet « first » — STM32N6570-DK
 
-**Dernière mise à jour : 2026-04-06 (session 11)**
+**Dernière mise à jour : 2026-04-06 (session 12)**
 
-## ÉCRAN LCD ROUGE — FONCTIONNEL ✅ | GDB DEBUG — FONCTIONNEL ✅
+## ÉCRAN LCD ROUGE — FONCTIONNEL ✅ (Phase 1) | Phase 2 TrustZone — ÉCRAN NOIR ❌ | GDB DEBUG — FONCTIONNEL ✅
 
-**Dernières évolutions (session 11 du 2026-04-06) :**
+**Dernières évolutions (session 12 du 2026-04-06, soir) :**
+- **Phase 2 TrustZone réactivée** dans AppliSecure : LTDC init complète côté Secure (section 7), CFBAR=0x34200000 (alias S), RIMC LTDC SEC+PRIV+CID1.
+- **Découverte RISAF mapping** : RISAF4/RISAF5 = ports NPU uniquement (4 GB, pas le CPU AXI). SRAM3 CPU AXI **n'a PAS de RISAF dédié** — l'accès NS est bloqué par le NoC/interconnect, pas par RISAF. RISAF4 IASR=0 confirme.
+- **Approche SEC+PRIV** : RIMC LTDC1/LTDC2 = SEC+PRIV, RISC LTDC/L1/L2 = SEC+PRIV, CFBAR = 0x34200000 (alias Secure). LTDC reste SEC (pas de bascule NSEC).
+- **Diagnostics GPIO** : PB13(CLK)=AF14 ✅, PE11(VSYNC)=AF14 ✅, PG13(DE)=OUT HIGH ✅, PQ3+PQ6=HIGH ✅.
+- **ISR=0** (aucune erreur DMA), **CPSR change** (LTDC scanne) — mais écran **toujours noir**, même le BCCR vert n'est pas visible.
+- **INDICE CLÉ : RIMC_LTDC1 = 0x00000310** → DMAEN(bit31)=0 ❌, CID=0 au lieu de 1 ❌. Le `|= (1UL<<31)` et le CID=1 HAL ne persistent pas dans le registre. **Piste prioritaire pour la prochaine session.**
+
+**Évolutions précédentes (session 11 du 2026-04-06) :**
 - **CubeIDE 2.1.1 découvert** : installé dans `C:\ST\STM32CubeIDE_1.13.0\` (nom de dossier trompeur, confirmé via `stm32cubeide.ini`). Contient GCC 14.3.1, GDB server 7.13.0, CubeProgrammer v2.22.0.
 - **GDB debug fonctionne** avec GDB server 7.13 + AP 1 (`-m 1`) + connect under reset (`-k`). L'ancien GDB server 7.1 (CubeIDE 1.11) ne supporte pas le N6.
 - **Attention flash** : le `-d file.elf` du CubeProgrammer peut charger le fichier ELF brut au lieu de parser les sections. La tâche tasks.json (mode=UR + coreReg + -s) reste la méthode fiable.
@@ -44,8 +52,8 @@ Ce document centralise toute la connaissance acquise sur le projet. Il permet à
 | Projet | État | Rôle |
 |--------|------|------|
 | **first_FSBL** | **ACTIF — LCD fonctionnel** | Init horloges (PLL1 1200 MHz + PLL4 600 MHz), GPIO, Security (RIMC+RISC), SRAM3/4, LTDC 25 MHz, HAL_LTDC_Init, Layer RGB565, FB RED, LED blink |
-| **first_AppliSecure** | Inactif (pas de jump) | Config TrustZone — sera réactivé en Phase 2 |
-| **first_AppliNonSecure** | Inactif (pas de jump) | Application LVGL — sera réactivé en Phase 2 |
+| **first_AppliSecure** | **ACTIF — Phase 2 en cours** | Config TrustZone + LTDC init complète (section 7), RIMC/RISC SEC+PRIV, CFBAR=0x34200000 (S alias). Écran noir — RIMC DMAEN/CID suspects |
+| **first_AppliNonSecure** | **ACTIF — chenillard + diagnostic** | LEDs chenillard, USART2 traces, lecture registres LTDC (retournent 0 car LTDC=SEC) |
 
 ### Boot FSBL (Phase 1)
 
@@ -81,9 +89,9 @@ STM32_Programmer_CLI -c port=SWD sn=<SN> mode=HotPlug -s
 - **BOOT1** doit être en position **1-3** (dev mode, boot ROM halted)
 - Flash externe **effacée** (pas de factory demo)
 
-### Ancienne architecture TrustZone (Phase 2 — à réactiver)
+### Architecture TrustZone Phase 2 (en cours — session 12)
 
-La chaîne FSBL → AppliSecure → AppliNonSecure fonctionnait pour les LEDs et USART2, mais le LCD restait noir en mode TrustZone split. Les écritures NS vers les registres LTDC étaient silencieusement ignorées. Phase 2 réintégrera TrustZone en gardant l'init LTDC côté Secure.
+La chaîne FSBL → AppliSecure → AppliNonSecure fonctionne pour les LEDs et USART2. L'init LTDC complète est faite côté Secure dans AppliSecure (section 7, registres CMSIS via alias `_S`). Le LTDC reste SEC+PRIV (pas de bascule NSEC). L'écran reste **noir** malgré tous les registres apparemment corrects. Indice : RIMC_LTDC1 readback montre DMAEN=0 et CID=0 (voir §5.1).
 
 ---
 
@@ -99,25 +107,30 @@ En Phase 1, toute la config sécurité est dans le FSBL, via les API HAL :
 - **Pixel clock** : IC16 = PLL4 (600 MHz) / 24 = 25 MHz via `HAL_RCCEx_PeriphCLKConfig`
 - **LTDC** : `HAL_LTDC_Init` + `HAL_LTDC_ConfigLayer` (tout via HAL, pas CMSIS direct)
 
-### 2.2 Phase 2 (à venir) : AppliSecure + AppliNonSecure
+### 2.2 Phase 2 (EN COURS — session 12) : AppliSecure + AppliNonSecure
 
-Le code TrustZone split reste dans `AppliSecure/Core/Src/main.c` (USER CODE RIF_Init 2) mais n'est plus exécuté en Phase 1. Il contient :
+Le code TrustZone split est **actif** dans `AppliSecure/Core/Src/main.c`. La chaîne FSBL → AppliSecure → AppliNonSecure fonctionne (LEDs + USART2 OK), mais l'écran LCD reste noir.
 
-- **RISUP NSEC+NPRIV** : USART2, LTDC, LTDC_L1, LTDC_L2
-- **RIMC** : LTDC1/LTDC2 = CID1, NSEC, NPRIV (bit 31 MDMA forcé via CMSIS)
+**Config RIF (USER CODE RIF_Init 2)** :
+- **RISC (section 1)** : USART2 = NSEC+NPRIV. **LTDC/LTDCL1/LTDCL2 = SEC+PRIV** (changé session 12, avant : NSEC+NPRIV)
+- **RIMC (section 2)** : LTDC1/LTDC2 = CID1 + **SEC+PRIV** (changé session 12, avant : NSEC+NPRIV). Bit 31 DMAEN forcé via `RIFSC->RIMC_ATTRx[...] |= (1UL << 31)`. **ATTENTION** : readback montre `RIMC_LTDC1=0x00000310` → DMAEN(bit31)=0, CID=0 au lieu de 1. Le HAL ou le HW ne retient pas ces valeurs.
 - **GPIO NSEC** : toutes les broches LCD (PA15, PB4, PB13, PE1, PG0 ajoutées manuellement car CubeMX les oublie), les 5 LEDs debug (PD0, PE9, PH5, PE10, PE13), GPIOQ (PQ3, PQ6)
 - **SRAM3/4** : clocks + shutdown (retry si FSBL n'a pas pris effet)
-- **RISAF4** : même config que FSBL (Region 0, ouvert à tous CIDs)
+- **RISAF4 (section 7d1)** : Region 0 full range (0x00000000–0xFFFFFFFF), tous CIDs autorisés, NSEC. **Note** : RISAF4 = port NPU 0, pas le CPU AXI SRAM3 (voir §2.3).
+- **NPU clock** : `__HAL_RCC_NPU_CLK_ENABLE()` activée (section 5d) car RISAF4/5 sont sur le bus NPU
 - **LTDC clocks** : IC16, CCIPR4, APB5, reset (mêmes valeurs que FSBL)
 - **PUBCFGR** : IC16PUB, PERPUB, APB5PUB, AXISRAM3/4PUB
 - **MPU NS** : region 7, 0x24200000 (768 KB), NON_CACHEABLE, OUTER_SHAREABLE, ALL_RW
-- **Section 7 — LTDC FULL INIT FROM SECURE** (ajouté session 2026-04-05 soir) :
+- **Section 7 — LTDC FULL INIT FROM SECURE** :
   - GPIO AF14 pour toutes les broches LCD (identique au BSP `LTDC_MspInit`)
   - Sorties PP : PQ3 (LCD_ON) HIGH, PQ6 (BL) HIGH, PG13 (DE, pull-up) HIGH
   - PE1 : cycle reset panneau (LOW 2ms → HIGH 120ms via `HAL_Delay`)
-  - LTDC registres via `LTDC_S` / `LTDC_Layer1_S` : timings RK050HR18, layer 1 RGB565, `CFBAR=0x24200000`, `CFBLR`, `CFBLNR`, `CACR=0xFF`, `BFCR` PAxCA
-  - Remplissage FB blanc (`0xFFFF`) via pointeur volatile sur 0x24200000
+  - LTDC registres via `LTDC_S` / `LTDC_Layer1_S` : timings RK050HR18, layer 1 RGB565, **`CFBAR=0x34200000`** (alias Secure, changé session 12), `CFBLR`, `CFBLNR`, `CACR=0xFF`, `BFCR` PAxCA
+  - Remplissage FB blanc via pointeur volatile sur 0x34200000 (alias S, données OK : `FB@S=0xA5A5`)
   - Enable (`LEN` + `LTDCEN`) + **`SRCR_IMR`** (reload immédiat, **sans GRMSK**)
+  - **Section 7f2** : diagnostic BCCR vert (0x0000FF00), ISR/CPSR readback → ISR=0, CPSR scanne OK
+  - **Section 7f3** : diagnostic GPIO readback (tous AF14/OUTPUT OK) + RIMC_LTDC1 readback (0x00000310)
+  - **Section 7g** : LTDC **reste SEC** (pas de bascule NSEC). AppliNonSecure accèderait via NSC veneers si nécessaire.
 - **NonSecure_Init()** : écrit `VTOR_NS = SRAM2_AXI_BASE_NS + 0x400`, positionne MSP_NS, saute vers le Reset_Handler NS
 
 ### 2.3 Points critiques TrustZone (leçons apprises)
@@ -130,6 +143,8 @@ Le code TrustZone split reste dans `AppliSecure/Core/Src/main.c` (USER CODE RIF_
 - Le bit **GRMSK** (bit 2) du registre `LTDC_LxRCR` **masque le reload global** depuis `LTDC_SRCR`. Si GRMSK=1, `SRCR_VBR` et `SRCR_IMR` sont sans effet pour ce layer → les shadow registers ne se chargent jamais → registres actifs (CFBAR etc.) = valeur reset (0).
 - **`RCC->MEMENR` lu depuis NS** retourne 0 si les bits PUBCFGR correspondants ne sont pas positionnés. Le diagnostic `SRAM3 clock OFF` était un **faux négatif**. Ne pas se fier à `RCC_NS->MEMENR` pour vérifier les clocks mémoire depuis le monde NS.
 - **`Error_Handler()` par défaut CubeMX** contient `while(1)`. Dans un FSBL, cela **bloque toute la chaîne de boot** si un seul `MX_xxx_Init` échoue (ex. SDMMC sans carte SD). Solution : rendre `Error_Handler` non-bloquant dans le FSBL + skipper les `MX_xxx_Init` inutiles au boot.
+- **(Session 12) RISAF4 et RISAF5 = ports NPU uniquement** (existent seulement si `NPU_PRESENT` est défini). Espace d'adressage 4 GB (pas 1 MB comme RISAF2/3). **SRAM3 CPU AXI n'a PAS de RISAF dédié**. L'accès NS à SRAM3 (0x24200000) est bloqué par le **NoC/AXI interconnect**, pas par RISAF. Mapping complet : RISAF2=AXISRAM1(1MB), RISAF3=AXISRAM2(1MB), RISAF4=NPU port 0(4GB), RISAF5=NPU port 1(4GB), RISAF6=NoC(4GB), RISAF7=FLEXRAM(512KB).
+- **(Session 12) RIMC_LTDC1 readback = 0x00000310** : décodage → MSEC=1, MPRIV=1, CIDSEL=1, **MCID=0** (devrait être 1), **DMAEN(bit31)=0** (malgré `|= (1UL<<31)`). Hypothèse : le HAL écrase le registre après notre `|=`, ou le format registre diffère de l'attendu. Vérifier l'ordre d'exécution et la datasheet RIMC_ATTRx.
 
 ---
 
@@ -194,26 +209,30 @@ while(1) {
 
 `lv_refr_now()` a été retiré (bloquait le boot). Le `lv_timer_handler()` s'occupe du rendu LVGL.
 
-### 4.4 LTDC init détaillée (maintenant dans `AppliSecure/Core/Src/main.c`, section 7)
+### 4.4 LTDC init détaillée (dans `AppliSecure/Core/Src/main.c`, section 7)
 
 Le driver LTDC est piloté par registres CMSIS via les alias **Secure** (`LTDC_S`, `LTDC_Layer1_S`) car :
-1. STM32N6 ne fournit pas de HAL LTDC fonctionnelle (`stm32n6xx_hal_ltdc.c` est un stub vide)
-2. Les écritures NS vers `LTDC_NS` sont **silencieusement ignorées** (voir §2.3)
+1. Les écritures NS vers `LTDC_NS` sont **silencieusement ignorées** (voir §2.3)
 
 Points clés :
 - **RCR = 0** : ne **JAMAIS** mettre **GRMSK** (bit 2). GRMSK masque le reload global (`SRCR`) → les shadow registers ne se chargent pas → registres actifs = valeurs reset (0). C'était la cause du CFBAR=0.
 - **Reload** : utiliser `LTDC_SRCR_IMR` (reload immédiat global), attendre que le HW efface le bit.
 - **CFBLR** : `line_length = width * bytes_per_pixel + 7` (et non +3 comme les anciens STM32).
 - **Séquence** : `LEN` → `LTDCEN` → `RCR=0` → `SRCR=IMR` → attente.
-- **Framebuffer** : rempli en blanc (0xFFFF RGB565) par Secure avant enable.
+- **Framebuffer** : rempli en blanc (`0xFFFF` RGB565) par Secure avant enable. Adresse **0x34200000** (alias Secure, changé session 12 — avant 0x24200000). Données confirmées : `FB@S[0]=0xA5A5` (pattern test).
+- **CFBAR = 0x34200000** (alias Secure) car le DMA LTDC est configuré SEC+PRIV (session 12). L'alias NS 0x24200000 n'est pas accessible au DMA LTDC en mode SEC.
 
 ---
 
-## 5. LCD / LTDC — FONCTIONNEL ✅
+## 5. LCD / LTDC — Phase 1 FONCTIONNEL ✅ | Phase 2 ÉCRAN NOIR ❌
 
 ### 5.1 État actuel
 
-**L'écran affiche du ROUGE** (RGB565 0xF800) en mode FSBL Secure-only (Phase 1). Confirmé par trace USART et visuellement.
+**Phase 1 (FSBL-only)** : l'écran affiche du ROUGE (RGB565 0xF800). Confirmé par trace USART et visuellement. ✅
+
+**Phase 2 (TrustZone, session 12)** : écran **NOIR** ❌. L'init LTDC est faite côté Secure dans AppliSecure (section 7). Tous les registres semblent corrects (GCR, CFBAR, CR, SRCR), ISR=0 (pas d'erreur DMA), CPSR change (LTDC scanne). Même le BCCR vert (couleur de fond, pas de DMA nécessaire) n'est **pas visible**. GPIO vérifiés OK (PB13/PE11 = AF14, PG13/PQ3/PQ6 = OUTPUT HIGH).
+
+**Indice clé non résolu** : `RIMC_LTDC1 = 0x00000310` → DMAEN(bit31)=0, CID=0 (attendu : DMAEN=1, CID=1). Le code fait `HAL_RIF_RIMC_ConfigMasterAttributes(LTDC1, {CID1, SEC+PRIV})` puis `|= (1UL<<31)`, mais le readback ne reflète pas ces valeurs. Piste prioritaire pour la prochaine session.
 
 ### 5.2 Configuration LTDC fonctionnelle
 
@@ -258,8 +277,16 @@ Points clés :
 | 7 | Séquence boot LED, LVGL junction | Noir (build stale) |
 | 8 | FSBL bloqué par Error_Handler → fix 12 MX_xxx_Init | LED OK, LCD non testé |
 | **9** | **Phase 1 FSBL-only : HAL LTDC, PLL4 25MHz, 3-step flash** | **ROUGE ✅** |
+| 10 | LCD ROUGE confirmé (Phase 1), GDB debug fonctionnel avec CubeIDE 2.1.1 | **ROUGE ✅** |
+| 11 | CubeIDE 2.1.1 découvert, GDB server 7.13 + AP 1, pièges documentés | **ROUGE ✅** |
+| **12** | **Phase 2 TrustZone : RIMC SEC+PRIV, CFBAR=0x34200000, GPIO/RIMC diag** | **NOIR ❌** |
 
-**Leçon clé** : sur STM32N6, le LCD doit être initialisé **entièrement côté Secure**. Les écritures NS vers LTDC sont silencieusement ignorées, même avec RISUP NSEC. L'approche HAL (pas CMSIS direct) est plus fiable et reproductible.
+**Prochain test recommandé (session 13)** :
+1. Investiguer pourquoi `RIMC_LTDC1` readback = 0x00000310 (DMAEN=0, CID=0) malgré le code
+2. Vérifier si `HAL_RIF_RIMC_ConfigMasterAttributes` écrase le bit 31 (DMAEN) qu'on force ensuite
+3. Tester en inversant l'ordre : forcer bit 31 **dans** le HAL call (via le champ adéquat), ou vérifier si un autre appel HAL réinitialise le registre
+4. Si le BCCR vert (pas de DMA) n'est pas visible, chercher si le pixel clock arrive réellement au panneau (oscilloscope sur PB13 si possible)
+5. Envisager de revenir à l'approche HAL_LTDC_Init (qui fonctionne en Phase 1) au lieu des écritures registres CMSIS directes
 
 ---
 
@@ -424,13 +451,13 @@ Pour un nouvel assistant, lire dans cet ordre :
 | # | Fichier | Pourquoi |
 |---|---------|----------|
 | 1 | `ETAT_PROJET_FIRST.md` | Ce document — vue d'ensemble complète |
-| 2 | `FSBL/Core/Src/main.c` | **Code principal actif** : Phase 1 LCD test, Security, SRAM, LTDC HAL, LED blink |
-| 3 | `FSBL/Core/Inc/stm32n6xx_hal_conf.h` | Modules HAL activés (LTDC, RAMCFG, RIF) |
-| 4 | `FSBL/STM32N657X0HXQ_AXISRAM2_fsbl.ld` | Linker FSBL : ROM=0x34180400, RAM=0x341C0000 |
-| 5 | `.vscode/tasks.json` | Tâches Build + Flash (3-step sequence) |
-| 6 | `AppliSecure/Core/Src/main.c` | Config TrustZone (Phase 2, inactif) |
-| 7 | `AppliNonSecure/Core/Src/main.c` | Application LVGL (Phase 2, inactif) |
-| 8 | `AppliNonSecure/GUI/lvgl_port/lv_port_disp_ltdc.c` | Driver LTDC LVGL (Phase 2, inactif) |
+| 2 | `FSBL/Core/Src/main.c` | Phase 1 LCD test (ROUGE OK), Security, SRAM, LTDC HAL, LED blink |
+| 3 | `AppliSecure/Core/Src/main.c` | **Code principal actif Phase 2** : TrustZone RIF, LTDC init Secure (section 7), GPIO/RIMC diagnostics |
+| 4 | `FSBL/Core/Inc/stm32n6xx_hal_conf.h` | Modules HAL activés (LTDC, RAMCFG, RIF) |
+| 5 | `FSBL/STM32N657X0HXQ_AXISRAM2_fsbl.ld` | Linker FSBL : ROM=0x34180400, RAM=0x341C0000 |
+| 6 | `.vscode/tasks.json` | Tâches Build + Flash (3-step sequence) |
+| 7 | `AppliNonSecure/Core/Src/main.c` | Application LVGL + chenillard LEDs + diagnostic LTDC |
+| 8 | `AppliNonSecure/GUI/lvgl_port/lv_port_disp_ltdc.c` | Driver LTDC LVGL (Phase 2) |
 
 **Autres fichiers .md existants** (contexte historique détaillé, non indispensables si ce document est lu) :
 - `ANALYSE_PROJET_FIRST.md` — structure du projet CubeMX

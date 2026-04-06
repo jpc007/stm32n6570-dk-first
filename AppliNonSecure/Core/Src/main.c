@@ -164,6 +164,16 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
+  /* ==== EARLIEST POSSIBLE TRACE — USART2 still configured from FSBL ==== */
+  /* Direct register write, no HAL, no GPIO, no clock enable needed. */
+  {
+    const char *msg = "\r\n[NS] main() reached!\r\n";
+    while (*msg) {
+      while (!(USART2->ISR & USART_ISR_TXE_TXFNF)) {}
+      USART2->TDR = (uint8_t)*msg++;
+    }
+  }
+
   /* ==== EARLY DIAG : LED BLANC = "NS main() atteint" ==== */
   RCC->AHB4ENR |= RCC_AHB4ENR_GPIOEEN;  /* horloge GPIOE */
   __DSB();

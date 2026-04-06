@@ -163,6 +163,16 @@ extern void *g_pfnVectors;
 
 void SystemInit(void)
 {
+  /* Earliest possible USART2 trace — direct register access, no HAL needed.
+   * USART2 is still configured from FSBL (registers persist across jumps). */
+  {
+    const char *msg = "[NS] SystemInit entry\r\n";
+    while (*msg) {
+      while (!(((USART_TypeDef *)USART2_BASE)->ISR & USART_ISR_TXE_TXFNF)) {}
+      ((USART_TypeDef *)USART2_BASE)->TDR = (uint8_t)*msg++;
+    }
+  }
+
   /* Vector table location and FPU setup done by secure application */
 
   /* Configure the Vector Table location -------------------------------------*/

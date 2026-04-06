@@ -85,6 +85,7 @@
                 "-c", "port=SWD", "sn=004200253234511233353533", "reset=HWrst",
                 "-hardRst"
             ],
+            "hide": true,
             "problemMatcher": [],
             "presentation": {
                 "reveal": "always",
@@ -100,11 +101,122 @@
                 "-c", "port=SWD", "sn=004200253234511233353533", "mode=UR", "reset=HWrst",
                 "-e", "all"
             ],
+            "hide": true,
             "problemMatcher": [],
             "presentation": {
                 "reveal": "always",
                 "panel": "shared",
                 "clear": true
+            }
+        },
+        {
+            "label": "AppliSecure: Build",
+            "type": "shell",
+            "command": "C:\\ST\\STM32CubeIDE_1.13.0\\STM32CubeIDE\\plugins\\com.st.stm32cube.ide.mcu.externaltools.make.win32_2.2.100.202601091506\\tools\\bin\\make.exe",
+            "args": [
+                "-j4",
+                "all"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/AppliSecure/Debug",
+                "env": {
+                    "PATH": "C:\\ST\\STM32CubeIDE_1.13.0\\STM32CubeIDE\\plugins\\com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.14.3.rel1.win32_1.0.100.202602081740\\tools\\bin;${env:PATH}"
+                }
+            },
+            "group": "build",
+            "problemMatcher": "$gcc",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        },
+        {
+            "label": "AppliNonSecure: Build",
+            "type": "shell",
+            "command": "C:\\ST\\STM32CubeIDE_1.13.0\\STM32CubeIDE\\plugins\\com.st.stm32cube.ide.mcu.externaltools.make.win32_2.2.100.202601091506\\tools\\bin\\make.exe",
+            "args": [
+                "-j4",
+                "all"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/AppliNonSecure/Debug",
+                "env": {
+                    "PATH": "C:\\ST\\STM32CubeIDE_1.13.0\\STM32CubeIDE\\plugins\\com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.14.3.rel1.win32_1.0.100.202602081740\\tools\\bin;${env:PATH}"
+                }
+            },
+            "group": "build",
+            "problemMatcher": "$gcc",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        },
+        {
+            "label": "All: Build",
+            "dependsOn": [
+                "FSBL: Build",
+                "AppliSecure: Build",
+                "AppliNonSecure: Build"
+            ],
+            "dependsOrder": "sequence",
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "All: Load to RAM + Run",
+            "type": "shell",
+            "command": "$prog='C:\\ST\\STM32CubeIDE_1.13.0\\STM32CubeIDE\\plugins\\com.st.stm32cube.ide.mcu.externaltools.cubeprogrammer.win32_2.2.400.202601091506\\tools\\bin\\STM32_Programmer_CLI.exe'; $fsbl='${workspaceFolder}/FSBL/Debug/first_FSBL.elf'; $sec='${workspaceFolder}/AppliSecure/Debug/first_AppliSecure.elf'; $ns='${workspaceFolder}/AppliNonSecure/Debug/first_AppliNonSecure.elf'; $objdump='C:\\ST\\STM32CubeIDE_1.13.0\\STM32CubeIDE\\plugins\\com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.14.3.rel1.win32_1.0.100.202602081740\\tools\\bin\\arm-none-eabi-objdump.exe'; $entry=(& $objdump -f $fsbl | Select-String 'start address (0x[0-9a-fA-F]+)').Matches[0].Groups[1].Value; Write-Host \"FSBL entry: $entry\"; Write-Host '--- [1/5] Download FSBL ---'; & $prog -c port=SWD sn=004200253234511233353533 mode=UR reset=HWrst -d $fsbl; Write-Host '--- [2/5] Download AppliSecure ---'; & $prog -c port=SWD sn=004200253234511233353533 mode=HotPlug -d $sec; Write-Host '--- [3/5] Download AppliNonSecure ---'; & $prog -c port=SWD sn=004200253234511233353533 mode=HotPlug -d $ns; Write-Host '--- [4/5] Set MSP + PC ---'; & $prog -c port=SWD sn=004200253234511233353533 mode=HotPlug -coreReg MSP=0x34200000 PC=$entry; Write-Host '--- [5/5] Start ---'; & $prog -c port=SWD sn=004200253234511233353533 mode=HotPlug -s",
+            "args": [],
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        },
+        {
+            "label": "All: Load to RAM (halted)",
+            "type": "shell",
+            "command": "$prog='C:\\ST\\STM32CubeIDE_1.13.0\\STM32CubeIDE\\plugins\\com.st.stm32cube.ide.mcu.externaltools.cubeprogrammer.win32_2.2.400.202601091506\\tools\\bin\\STM32_Programmer_CLI.exe'; $fsbl='${workspaceFolder}/FSBL/Debug/first_FSBL.elf'; $sec='${workspaceFolder}/AppliSecure/Debug/first_AppliSecure.elf'; $ns='${workspaceFolder}/AppliNonSecure/Debug/first_AppliNonSecure.elf'; Write-Host '--- [1/3] Download FSBL ---'; & $prog -c port=SWD sn=004200253234511233353533 mode=UR reset=HWrst -d $fsbl; Write-Host '--- [2/3] Download AppliSecure ---'; & $prog -c port=SWD sn=004200253234511233353533 mode=HotPlug -d $sec; Write-Host '--- [3/3] Download AppliNonSecure ---'; & $prog -c port=SWD sn=004200253234511233353533 mode=HotPlug -d $ns",
+            "args": [],
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        },
+        {
+            "label": "All: Build + Load + Run",
+            "dependsOn": [
+                "All: Build",
+                "All: Load to RAM + Run"
+            ],
+            "dependsOrder": "sequence",
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "All: Build + Load (debug)",
+            "dependsOn": [
+                "All: Build",
+                "All: Load to RAM (halted)"
+            ],
+            "dependsOrder": "sequence",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
             }
         }
     ]

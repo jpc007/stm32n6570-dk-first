@@ -21,7 +21,6 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "stm32n6xx_hal_ltdc.h"
 #include "stm32n6xx_hal_rif.h"
 #include <string.h>
 /* USER CODE END Includes */
@@ -33,15 +32,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define LCD_WIDTH   800U
-#define LCD_HEIGHT  480U
-#define LCD_HSYNC   4U
-#define LCD_HBP     4U
-#define LCD_HFP     4U
-#define LCD_VSYNC   4U
-#define LCD_VBP     4U
-#define LCD_VFP     4U
-#define FB_ADDRESS  0x34200000U  /* SRAM3 secure alias */
+#define APPLI_SECURE_ADDR  0x34000400U   /* AppliSecure vector table in SRAM1 */
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -71,7 +62,6 @@ XSPI_HandleTypeDef hxspi1;
 XSPI_HandleTypeDef hxspi2;
 
 /* USER CODE BEGIN PV */
-LTDC_HandleTypeDef hltdc;
 static UART_HandleTypeDef huart2;
 /* USER CODE END PV */
 
@@ -95,9 +85,8 @@ static void MX_XSPI2_Init(void);
 static void Security_Config(void);
 static void SRAM_Enable(void);
 static void USART2_Init(void);
-static void LTDC_ClockConfig(void);
-static void LTDC_Init_Phase1(void);
 static void UART_Print(const char *msg);
+static void Jump_To_AppliSecure(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -110,6 +99,16 @@ static void UART_Print(const char *msg)
 {
   HAL_UART_Transmit(&huart2, (const uint8_t *)msg,
                     (uint16_t)strlen(msg), 200);
+}
+static void UART_PrintHex32(uint32_t v)
+{
+  char h[9];
+  for (int i = 7; i >= 0; i--) {
+    uint8_t n = (v >> (i*4)) & 0xF;
+    h[7-i] = n < 10 ? '0'+n : 'A'+n-10;
+  }
+  h[8] = '\0';
+  UART_Print(h);
 }
 
 /* ------------------------------------------------------------------ */
@@ -165,15 +164,22 @@ static void Security_Config(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Enable SRAM3+SRAM4 (AXI SRAMs for framebuffer) via HAL            */
+/* Enable SRAMs for the 3-stage boot chain                            */
+/*   SRAM1 : AppliSecure code+data (0x34000000, already active)       */
+/*   SRAM2 : AppliNonSecure code+data (0x24100000)                    */
+/*   SRAM3+SRAM4 : Framebuffer LTDC (0x24200000)                      */
 /* ------------------------------------------------------------------ */
 static void SRAM_Enable(void)
 {
   RAMCFG_HandleTypeDef hramcfg = {0};
 
+  __HAL_RCC_AXISRAM2_MEM_CLK_ENABLE();
   __HAL_RCC_AXISRAM3_MEM_CLK_ENABLE();
   __HAL_RCC_AXISRAM4_MEM_CLK_ENABLE();
   __HAL_RCC_RAMCFG_CLK_ENABLE();
+
+  hramcfg.Instance = RAMCFG_SRAM2_AXI;
+  HAL_RAMCFG_EnableAXISRAM(&hramcfg);
 
   hramcfg.Instance = RAMCFG_SRAM3_AXI;
   HAL_RAMCFG_EnableAXISRAM(&hramcfg);
@@ -183,171 +189,49 @@ static void SRAM_Enable(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* LTDC pixel clock : IC16 = PLL4 / 2 = 25 MHz                       */
-/* PLL4 is configured in SystemClock_Config (600 MHz output)          */
+/* Jump to AppliSecure at APPLI_SECURE_ADDR (0x34000400)              */
+/* Reads MSP + Reset_Handler from the vector table, validates, jumps. */
 /* ------------------------------------------------------------------ */
-static void LTDC_ClockConfig(void)
+static void Jump_To_AppliSecure(void)
 {
-  RCC_PeriphCLKInitTypeDef pclk = {0};
-  pclk.PeriphClockSelection = RCC_PERIPHCLK_LTDC;
-  pclk.LtdcClockSelection   = RCC_LTDCCLKSOURCE_IC16;
-  pclk.ICSelection[RCC_IC16].ClockSelection = RCC_ICCLKSOURCE_PLL4;
-  pclk.ICSelection[RCC_IC16].ClockDivider   = 24;  /* 600 / 24 = 25 MHz */
-  HAL_RCCEx_PeriphCLKConfig(&pclk);
-}
+  typedef void (*pFunc)(void);
 
-/* ------------------------------------------------------------------ */
-/* HAL_LTDC_MspInit callback — GPIO setup for all LCD pins            */
-/* Called automatically by HAL_LTDC_Init()                            */
-/* Pin mapping from STM32N6570-DK BSP (stm32n6570_discovery_lcd.c)   */
-/* ------------------------------------------------------------------ */
-void HAL_LTDC_MspInit(LTDC_HandleTypeDef *hltdc_arg)
-{
-  GPIO_InitTypeDef gpio = {0};
+  uint32_t appli_msp   = *(__IO uint32_t *)(APPLI_SECURE_ADDR);
+  uint32_t appli_reset = *(__IO uint32_t *)(APPLI_SECURE_ADDR + 4U);
 
-  __HAL_RCC_LTDC_CLK_ENABLE();
-  __HAL_RCC_LTDC_FORCE_RESET();
-  __HAL_RCC_LTDC_RELEASE_RESET();
+  UART_Print("[FSBL] Vector @0x34000400 : MSP=");
+  /* Quick hex print for diagnostics */
+  {
+    static const char hex[] = "0123456789ABCDEF";
+    char buf[11];
+    buf[0] = '0'; buf[1] = 'x';
+    for (int i = 0; i < 8; i++) buf[2+i] = hex[(appli_msp >> (28-i*4)) & 0xFU];
+    buf[10] = '\0';
+    UART_Print(buf);
+    UART_Print(" Reset=");
+    for (int i = 0; i < 8; i++) buf[2+i] = hex[(appli_reset >> (28-i*4)) & 0xFU];
+    UART_Print(buf);
+    UART_Print("\r\n");
+  }
 
-  __HAL_RCC_GPIOA_CLK_ENABLE();
-  __HAL_RCC_GPIOB_CLK_ENABLE();
-  __HAL_RCC_GPIOD_CLK_ENABLE();
-  __HAL_RCC_GPIOE_CLK_ENABLE();
-  __HAL_RCC_GPIOG_CLK_ENABLE();
-  __HAL_RCC_GPIOH_CLK_ENABLE();
-  __HAL_RCC_GPIOQ_CLK_ENABLE();
+  /* Sanity check : MSP must be in SRAM range, Reset in code range */
+  if ((appli_msp & 0xFF000000U) != 0x34000000U ||
+      (appli_reset & 0xFF000000U) != 0x34000000U)
+  {
+    UART_Print("[FSBL] ERROR: invalid AppliSecure vectors!\r\n");
+    while (1) { HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_0); HAL_Delay(100); }
+  }
 
-  gpio.Mode      = GPIO_MODE_AF_PP;
-  gpio.Pull      = GPIO_NOPULL;
-  gpio.Speed     = GPIO_SPEED_FREQ_HIGH;
-  gpio.Alternate = GPIO_AF14_LCD;
-
-  /* GPIOA : G3(PA0), G2(PA1), B7(PA2), B1(PA7), B6(PA8), R5(PA15) */
-  gpio.Pin = GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_7 | GPIO_PIN_8 | GPIO_PIN_15;
-  HAL_GPIO_Init(GPIOA, &gpio);
-
-  /* GPIOB : B2(PB2), R3(PB4), G6(PB11), G5(PB12), CLK(PB13), HSYNC(PB14), G4(PB15) */
-  gpio.Pin = GPIO_PIN_2 | GPIO_PIN_4 | GPIO_PIN_11 | GPIO_PIN_12 | GPIO_PIN_13 | GPIO_PIN_14 | GPIO_PIN_15;
-  HAL_GPIO_Init(GPIOB, &gpio);
-
-  /* GPIOD : R7(PD8), R1(PD9), R2(PD15) */
-  gpio.Pin = GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_15;
-  HAL_GPIO_Init(GPIOD, &gpio);
-
-  /* GPIOE : VSYNC(PE11) */
-  gpio.Pin = GPIO_PIN_11;
-  HAL_GPIO_Init(GPIOE, &gpio);
-
-  /* GPIOG : R0(PG0), G1(PG1), B3(PG6), G7(PG8), R6(PG11), G0(PG12) */
-  gpio.Pin = GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_6 | GPIO_PIN_8 | GPIO_PIN_11 | GPIO_PIN_12;
-  HAL_GPIO_Init(GPIOG, &gpio);
-
-  /* GPIOH : B4(PH3), R4(PH4), B5(PH6) */
-  gpio.Pin = GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_6;
-  HAL_GPIO_Init(GPIOH, &gpio);
-
-  /* B0 = PP15 → need GPIOP */
-  __HAL_RCC_GPIOP_CLK_ENABLE();
-  gpio.Pin = GPIO_PIN_15;
-  HAL_GPIO_Init(GPIOP, &gpio);
-
-  /* ---- Control GPIOs (output PP, not AF) ---- */
-  gpio.Mode = GPIO_MODE_OUTPUT_PP;
-  gpio.Speed = GPIO_SPEED_FREQ_LOW;
-
-  /* NRST (PE1) : reset pulse */
-  gpio.Pin = GPIO_PIN_1;
-  HAL_GPIO_Init(GPIOE, &gpio);
-  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_RESET);
-  HAL_Delay(10);
-  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_SET);
+  UART_Print("[FSBL] Jumping to AppliSecure...\r\n");
+  /* Small delay to let UART flush */
   HAL_Delay(10);
 
-  /* LCD_ONOFF (PQ3) */
-  gpio.Pin = GPIO_PIN_3;
-  HAL_GPIO_Init(GPIOQ, &gpio);
-  HAL_GPIO_WritePin(GPIOQ, GPIO_PIN_3, GPIO_PIN_SET);
+  SCB->VTOR = APPLI_SECURE_ADDR;
+  __set_MSP(appli_msp);
+  ((pFunc)appli_reset)();
 
-  /* LCD_DE (PG13) — display enable (held HIGH) */
-  gpio.Pin = GPIO_PIN_13;
-  HAL_GPIO_Init(GPIOG, &gpio);
-  HAL_GPIO_WritePin(GPIOG, GPIO_PIN_13, GPIO_PIN_SET);
-
-  /* LCD_BL_CTRL (PQ6) — backlight 100% */
-  gpio.Pin = GPIO_PIN_6;
-  HAL_GPIO_Init(GPIOQ, &gpio);
-  HAL_GPIO_WritePin(GPIOQ, GPIO_PIN_6, GPIO_PIN_SET);
-}
-
-/* ------------------------------------------------------------------ */
-/* LTDC init + Layer 0 config + framebuffer fill                      */
-/* ------------------------------------------------------------------ */
-static void LTDC_Init_Phase1(void)
-{
-  LTDC_LayerCfgTypeDef layer = {0};
-
-  /* LTDC timing configuration (RK050HR18 800x480 panel) */
-  hltdc.Instance = LTDC;
-  hltdc.Init.HSPolarity = LTDC_HSPOLARITY_AL;
-  hltdc.Init.VSPolarity = LTDC_VSPOLARITY_AL;
-  hltdc.Init.DEPolarity = LTDC_DEPOLARITY_AL;
-  hltdc.Init.PCPolarity = LTDC_PCPOLARITY_IPC;
-
-  hltdc.Init.HorizontalSync     = LCD_HSYNC - 1U;
-  hltdc.Init.AccumulatedHBP     = LCD_HSYNC + LCD_HBP - 1U;
-  hltdc.Init.AccumulatedActiveW = LCD_HSYNC + LCD_WIDTH + LCD_HBP - 1U;
-  hltdc.Init.TotalWidth         = LCD_HSYNC + LCD_WIDTH + LCD_HBP + LCD_HFP - 1U;
-  hltdc.Init.VerticalSync       = LCD_VSYNC - 1U;
-  hltdc.Init.AccumulatedVBP     = LCD_VSYNC + LCD_VBP - 1U;
-  hltdc.Init.AccumulatedActiveH = LCD_VSYNC + LCD_HEIGHT + LCD_VBP - 1U;
-  hltdc.Init.TotalHeigh         = LCD_VSYNC + LCD_HEIGHT + LCD_VBP + LCD_VFP - 1U;
-
-  hltdc.Init.Backcolor.Blue  = 0;
-  hltdc.Init.Backcolor.Green = 0;
-  hltdc.Init.Backcolor.Red   = 0;
-
-  if (HAL_LTDC_Init(&hltdc) != HAL_OK)
-  {
-    UART_Print("[LTDC] HAL_LTDC_Init FAILED\r\n");
-    return;
-  }
-  UART_Print("[LTDC] HAL_LTDC_Init OK\r\n");
-
-  /* Layer 0 : full screen RGB565, framebuffer in SRAM3 */
-  layer.WindowX0        = 0;
-  layer.WindowX1        = LCD_WIDTH;
-  layer.WindowY0        = 0;
-  layer.WindowY1        = LCD_HEIGHT;
-  layer.PixelFormat     = LTDC_PIXEL_FORMAT_RGB565;
-  layer.Alpha           = 255;
-  layer.Alpha0          = 0;
-  layer.BlendingFactor1 = LTDC_BLENDING_FACTOR1_CA;
-  layer.BlendingFactor2 = LTDC_BLENDING_FACTOR2_CA;
-  layer.FBStartAdress   = FB_ADDRESS;
-  layer.ImageWidth      = LCD_WIDTH;
-  layer.ImageHeight     = LCD_HEIGHT;
-  layer.Backcolor.Blue  = 0;
-  layer.Backcolor.Green = 0;
-  layer.Backcolor.Red   = 0;
-
-  if (HAL_LTDC_ConfigLayer(&hltdc, &layer, 0) != HAL_OK)
-  {
-    UART_Print("[LTDC] ConfigLayer FAILED\r\n");
-    return;
-  }
-  UART_Print("[LTDC] Layer 0 configured\r\n");
-
-  /* Fill framebuffer with solid RED (RGB565 = 0xF800) */
-  {
-    volatile uint16_t *fb = (volatile uint16_t *)FB_ADDRESS;
-    for (uint32_t i = 0; i < LCD_WIDTH * LCD_HEIGHT; i++)
-    {
-      fb[i] = 0xF800U;
-    }
-  }
-  UART_Print("[LTDC] Framebuffer filled RED\r\n");
-
-  __HAL_LTDC_ENABLE(&hltdc);
+  /* Should never return */
+  while (1) {}
 }
 
 /* USER CODE END 0 */
@@ -403,9 +287,10 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   /* ============================================================
-   * PHASE 1 — LCD TEST (Secure-only, no TrustZone jump)
+   * PHASE 2a — FSBL : init + jump to AppliSecure
    *
-   * LED OK! Now testing full LCD init.
+   * LED VERTE = preuve que le FSBL a tourne.
+   * Pas d'init LCD ici — c'est AppliSecure qui fait le LTDC.
    * ============================================================ */
   {
     /* LED verte (PD0) */
@@ -420,20 +305,31 @@ int main(void)
   }
 
   USART2_Init();
-  UART_Print("\r\n=== PHASE 1 : FSBL LCD TEST ===\r\n");
+  UART_Print("\r\n=== [1/3 FSBL] Phase 2a ===\r\n");
 
   Security_Config();
   UART_Print("[OK] Security_Config\r\n");
 
+  /* Diagnostic SRAM2 AVANT enable */
+  UART_Print("[FSBL] SRAM2 @0x34100400 BEFORE enable: ");
+  UART_PrintHex32(*(volatile uint32_t *)0x34100400);
+  UART_Print(" ");
+  UART_PrintHex32(*(volatile uint32_t *)0x34100404);
+  UART_Print("\r\n");
+
   SRAM_Enable();
-  UART_Print("[OK] SRAM3+SRAM4 enabled\r\n");
+  UART_Print("[OK] SRAM2+SRAM3+SRAM4 enabled\r\n");
 
-  LTDC_ClockConfig();
-  UART_Print("[OK] LTDC clock = 25 MHz\r\n");
+  /* Diagnostic SRAM2 APRES enable */
+  UART_Print("[FSBL] SRAM2 @0x34100400 AFTER enable:  ");
+  UART_PrintHex32(*(volatile uint32_t *)0x34100400);
+  UART_Print(" ");
+  UART_PrintHex32(*(volatile uint32_t *)0x34100404);
+  UART_Print("\r\n");
 
-  LTDC_Init_Phase1();
-
-  UART_Print("=== LCD should show RED ===\r\n");
+  UART_Print("[1/3 FSBL] -> AppliSecure\r\n");
+  Jump_To_AppliSecure();
+  /* Never reached */
 
   /* USER CODE END 2 */
 

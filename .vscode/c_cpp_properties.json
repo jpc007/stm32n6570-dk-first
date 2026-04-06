@@ -1,7 +1,32 @@
 {
     "configurations": [
         {
-            "name": "STM32N657 AppliNonSecure",
+            "name": "FSBL (Secure)",
+            "includePath": [
+                "${workspaceFolder}/FSBL/Core/Inc",
+                "${workspaceFolder}/Drivers/STM32N6xx_HAL_Driver/Inc",
+                "${workspaceFolder}/Drivers/STM32N6xx_HAL_Driver/Inc/Legacy",
+                "${workspaceFolder}/Drivers/CMSIS/Include",
+                "${workspaceFolder}/Drivers/CMSIS/Device/ST/STM32N6xx/Include"
+            ],
+            "defines": [
+                "DEBUG",
+                "STM32N657xx",
+                "USE_HAL_DRIVER",
+                "USE_FULL_LL_DRIVER",
+                "__ARM_ARCH_8_1M_MAIN__=1",
+                "__ARM_FEATURE_MVE=3"
+            ],
+            "compilerPath": "C:/ST/STM32CubeIDE_1.13.0/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.14.3.rel1.win32_1.0.100.202602081740/tools/bin/arm-none-eabi-gcc.exe",
+            "cStandard": "gnu11",
+            "intelliSenseMode": "gcc-arm",
+            "compilerArgs": [
+                "-mcpu=cortex-m55",
+                "-mthumb"
+            ]
+        },
+        {
+            "name": "AppliNonSecure",
             "includePath": [
                 "${workspaceFolder}/AppliNonSecure/Core/Inc",
                 "${workspaceFolder}/AppliNonSecure/GUI/lvgl_port",
@@ -26,6 +51,32 @@
             "compilerArgs": [
                 "-mcpu=cortex-m55",
                 "-mthumb"
+            ]
+        },
+        {
+            "name": "AppliSecure (TrustZone)",
+            "includePath": [
+                "${workspaceFolder}/AppliSecure/Core/Inc",
+                "${workspaceFolder}/Secure_nsclib",
+                "${workspaceFolder}/Drivers/STM32N6xx_HAL_Driver/Inc",
+                "${workspaceFolder}/Drivers/STM32N6xx_HAL_Driver/Inc/Legacy",
+                "${workspaceFolder}/Drivers/CMSIS/Include",
+                "${workspaceFolder}/Drivers/CMSIS/Device/ST/STM32N6xx/Include"
+            ],
+            "defines": [
+                "DEBUG",
+                "STM32N657xx",
+                "USE_HAL_DRIVER",
+                "__ARM_ARCH_8_1M_MAIN__=1",
+                "__ARM_FEATURE_MVE=3"
+            ],
+            "compilerPath": "C:/ST/STM32CubeIDE_1.13.0/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.14.3.rel1.win32_1.0.100.202602081740/tools/bin/arm-none-eabi-gcc.exe",
+            "cStandard": "gnu11",
+            "intelliSenseMode": "gcc-arm",
+            "compilerArgs": [
+                "-mcpu=cortex-m55",
+                "-mthumb",
+                "-mcmse"
             ]
         }
     ],
