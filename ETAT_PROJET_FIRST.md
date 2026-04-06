@@ -1,11 +1,17 @@
 # État du projet « first » — STM32N6570-DK
 
-**Dernière mise à jour : 2026-04-06**
+**Dernière mise à jour : 2026-04-06 (session 11)**
 
-## ÉCRAN LCD ROUGE — FONCTIONNEL ✅
+## ÉCRAN LCD ROUGE — FONCTIONNEL ✅ | GDB DEBUG — FONCTIONNEL ✅
 
-**Dernières évolutions (session du 2026-04-06, soir) :**
-- **LCD ROUGE AFFICHÉ** — après 5+ sessions d'écran noir, l'écran RK050HR18 affiche enfin du rouge. Trace USART complète confirmée :
+**Dernières évolutions (session 11 du 2026-04-06) :**
+- **CubeIDE 2.1.1 découvert** : installé dans `C:\ST\STM32CubeIDE_1.13.0\` (nom de dossier trompeur, confirmé via `stm32cubeide.ini`). Contient GCC 14.3.1, GDB server 7.13.0, CubeProgrammer v2.22.0.
+- **GDB debug fonctionne** avec GDB server 7.13 + AP 1 (`-m 1`) + connect under reset (`-k`). L'ancien GDB server 7.1 (CubeIDE 1.11) ne supporte pas le N6.
+- **Attention flash** : le `-d file.elf` du CubeProgrammer peut charger le fichier ELF brut au lieu de parser les sections. La tâche tasks.json (mode=UR + coreReg + -s) reste la méthode fiable.
+- **CubeIDE ouvert bloque le ST-LINK** : si STM32CubeIDE est lancé, les commandes Programmer CLI semblent réussir mais rien ne se passe sur la carte (pas de clignotement LED programmeur). Toujours fermer CubeIDE avant de flasher depuis VS Code.
+
+**Évolutions précédentes (session 10, 2026-04-06, soir) :**
+- **LCD ROUGE AFFICHÉ** — après 9 sessions d'écran noir, l'écran RK050HR18 affiche enfin du rouge. Trace USART complète confirmée :
   ```
   === PHASE 1 : FSBL LCD TEST ===
   [OK] Security_Config
@@ -324,9 +330,77 @@ Toutes les broches LED sont déclarées **NSEC+NPRIV** dans AppliSecure (USER CO
 
 ---
 
-## 8. Migration IAR
+## 8. Toolchains disponibles
 
-**Statut** : planifiée, **en attente** que la Phase 2 (TrustZone + LVGL) fonctionne. La Phase 1 LCD fonctionne sous VS Code + GCC + STM32_Programmer_CLI.
+### 8.1 CubeIDE 1.11.0 (toolchain actuelle pour le build)
+
+| Outil | Version | Chemin |
+|-------|---------|--------|
+| GCC | 10.3-2021.10 | `C:\Program Files\STM32CubeIDE_1.11.0\STM32CubeIDE\plugins\com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.10.3-2021.10.win32_1.0.200.202301161003\tools\bin\` |
+| Make | 2.0 | `...\externaltools.make.win32_2.0.100.202202231230\tools\bin\` |
+| GDB server | 7.1 | **NE SUPPORTE PAS le STM32N6** (errno 10061) |
+| CubeProgrammer | v2.20.0 (installé séparément) | `C:\Program Files\STMicroelectronics\STM32Cube\STM32CubeProgrammer\bin\` |
+
+### 8.2 CubeIDE 2.1.1 (découvert session 11 — GDB fonctionnel)
+
+Dossier : `C:\ST\STM32CubeIDE_1.13.0\STM32CubeIDE\` (nom trompeur, `stm32cubeide.ini` confirme `Version 2.1.1`, Build 28236, Mars 2026)
+
+| Outil | Version | Chemin (relatif au dossier plugins) |
+|-------|---------|--------|
+| GCC | **14.3.1** | `...gnu-tools-for-stm32.14.3.rel1.win32_1.0.100.202602081740\tools\bin\` |
+| Make | 2.2 | `...make.win32_2.2.100.202601091506\` |
+| GDB server | **7.13.0** | `...stlink-gdb-server.win32_2.2.400.202601091506\tools\bin\` |
+| CubeProgrammer | **v2.22.0** (bundled) | `...cubeprogrammer.win32_2.2.400.202601091506\tools\bin\` |
+
+### 8.3 GDB debug — configuration fonctionnelle
+
+**GDB server 7.13** fonctionne avec le STM32N6. Les paramètres clés :
+
+```powershell
+# Lancer le GDB server (en background)
+ST-LINK_gdbserver.exe -p 61234 -l 31 \
+  -cp "<chemin_cubeprogrammer_v2.22>" \
+  -d -m 1 -k -i 004200253234511233353533 -g
+```
+
+| Paramètre | Valeur | Pourquoi |
+|-----------|--------|----------|
+| `-m 1` | AP ID = 1 | Cortex-M55 Secure debug (AP 0 = mauvais, donne PC=0x0) |
+| `-k` | Connect under reset | Requis pour N6 TrustZone |
+| `-g` | Attach | S'attache au code déjà en mémoire |
+| `-d` | SWD mode | Interface debug |
+| `-cp` | CubeProgrammer **v2.22.0 bundled** | Doit matcher le GDB server (v2.20.0 = Fail create session) |
+| Fréquence | **Auto (24 MHz)** | `--freq` remplacé par `--frequency` dans v7.13 |
+| `-i` | Serial number | `--serial` remplacé par `-i` dans v7.13 |
+
+**GDB client** (test batch) :
+```powershell
+arm-none-eabi-gdb.exe --batch \
+  -ex "target remote localhost:61234" \
+  -ex "monitor halt" \
+  -ex "info reg pc sp lr" \
+  -ex "bt" \
+  -ex "disconnect" -ex "quit" \
+  FSBL/Debug/first_FSBL.elf
+```
+
+**Résultat confirmé** : session GDB créée (HALT_MODE), registres lus (PC dans le code FSBL, SP en SRAM3), backtrace obtenu. Le GDB server log montre `GdbSessionManager, session started: 1` puis `session terminated: 1` proprement.
+
+**Attention** : les adresses lues via GDB sont en alias Secure `0x18xxxxxx` (= `0x34xxxxxx` - offset). Les symboles ELF compilés pour `0x34180000` ne matchent pas directement.
+
+### 8.4 Pièges découverts (session 11)
+
+1. **CubeIDE ouvert = ST-LINK bloqué** : `stm32cubeide.exe` (PID visible via `Get-Process`) prend le contrôle exclusif du ST-LINK. Les commandes CLI semblent réussir (`Start operation achieved successfully`) mais **rien ne se passe** sur la carte. Toujours fermer CubeIDE.
+2. **`--freq` → `--frequency`** : le GDB server 7.13 a changé la syntaxe. `--freq` provoque un PARSE ERROR silencieux suivi de `Fail create session`.
+3. **`--serial` → `-i`** : même changement de syntaxe dans v7.13.
+4. **AP 0 vs AP 1** : `-m 0` (défaut) lit le mauvais Access Port → `PC: 0x0` → `Fail starting session`. Le fichier `.launch` de CubeIDE indique `access_port_id = 1`.
+5. **CubeProgrammer v2.20 vs v2.22** : le GDB server 7.13 attend la version bundled v2.22. Avec v2.20 → `Fail create session`.
+
+---
+
+## 9. Migration IAR
+
+**Statut** : planifiée, **en attente** que la Phase 2 (TrustZone + LVGL) fonctionne. La Phase 1 LCD fonctionne sous VS Code + GCC + STM32_Programmer_CLI. Le debug GDB fonctionne avec CubeIDE 2.1.1 (GDB server 7.13), ce qui réduit l'urgence de la migration IAR.
 
 **Motivation** : certification IEC 62304 classe B (MDR 2017/745), compilateur pré-qualifié IEC 61508 SIL 3, meilleur debugger (C-SPY), support TrustZone natif.
 
@@ -343,7 +417,7 @@ Toutes les broches LED sont déclarées **NSEC+NPRIV** dans AppliSecure (USER CO
 
 ---
 
-## 9. Fichiers à lire en priorité
+## 10. Fichiers à lire en priorité
 
 Pour un nouvel assistant, lire dans cet ordre :
 
