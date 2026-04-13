@@ -1076,9 +1076,9 @@ static void MX_GPIO_Init(void)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* NON-BLOQUANT : les MX_xxx_Init non essentiels (SDMMC, USB, XSPI...)
-   * peuvent echouer sans bloquer la chaine de boot FSBL -> AppliSecure.
-   * On continue pour atteindre le jump vers AppliSecure dans USER CODE BEGIN 2. */
+  /* NON-BLOCKING: non-essential MX_xxx_Init (SDMMC, USB, XSPI...)
+   * may fail without blocking the FSBL -> AppliSecure boot chain.
+   * We continue to reach the jump to AppliSecure in USER CODE BEGIN 2. */
   __NOP();
   /* USER CODE END Error_Handler_Debug */
 }

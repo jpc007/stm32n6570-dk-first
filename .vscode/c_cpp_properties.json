@@ -22,8 +22,10 @@
             "intelliSenseMode": "gcc-arm",
             "compilerArgs": [
                 "-mcpu=cortex-m55",
-                "-mthumb"
-            ]
+                "-mthumb",
+                "-mcmse"
+            ],
+            "compileCommands": "${workspaceFolder}/compile_commands.json"
         },
         {
             "name": "AppliNonSecure",
@@ -51,7 +53,8 @@
             "compilerArgs": [
                 "-mcpu=cortex-m55",
                 "-mthumb"
-            ]
+            ],
+            "compileCommands": "${workspaceFolder}/compile_commands.json"
         },
         {
             "name": "AppliSecure (TrustZone)",
@@ -77,7 +80,8 @@
                 "-mcpu=cortex-m55",
                 "-mthumb",
                 "-mcmse"
-            ]
+            ],
+            "compileCommands": "${workspaceFolder}/compile_commands.json"
         }
     ],
     "version": 4
