@@ -11,7 +11,7 @@
 - **USART2 côté NS** : suppression de `HAL_RCCEx_PeriphCLKConfig()` dans `HAL_UART_MspInit()` — le **kernel clock USART2 (CLKP)** est déjà configuré par le **FSBL** ; évite des accès **CCIPR / `LL_RCC_SetClockSource`** depuis le NS (risque RIF / attributs même avec PUBCFGR partiel).
 - **Chenillard** : après un essai à **60 ms** (jugé « hyper accéléré »), pas remis à 150 ms mais à **~120 ms** par LED (`main.c` NS) pour un rythme lisible tout en restant plus vif que l’original 150 ms.
 - **LEDs boot AppliSecure** (jaune PE9 / rouge PH5) : délais **500 ms → 200 ms** chacun (`AppliSecure/Core/Src/main.c`, USER stage 2) — intention : même idée de **pause observable** que l’écran rouge FSBL, **plus courte** sur les GPIO LED.
-- **Documentation** : cette session est consignée ici ; message Git en anglais : *Red boot screen retained; NonSecure HAL_Init TZ fix; LED chase timing; doc*.
+- **Documentation** : cette session est consignée ici ; commit Git `65f12d5` sur `main`, message : *Red boot screen retained; NonSecure TZ HAL_Msp fix; LED chase timing; doc* (dépôt `stm32n6570-dk-first`).
 
 **Dernières évolutions (session 15 du 2026-04-18) :**
 - **Fix définitif build dual-IDE (VS Code + CubeIDE)** : CubeMX ne génère PAS les règles de build pour `stm32n6xx_hal_rif.c` et `stm32n6xx_hal_ramcfg.c` dans `subdir.mk` malgré `HAL_RIF_MODULE_ENABLED` et `HAL_RAMCFG_MODULE_ENABLED` dans `hal_conf.h`. Modifier `subdir.mk` / `objects.list` manuellement fonctionnait pour VS Code mais était **écrasé à chaque build CubeIDE**. Ajouter des `<link>` dans `.project` était **ignoré** par CubeIDE (ne relit pas `.project` modifié en externe).
