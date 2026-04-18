@@ -59,6 +59,19 @@ SECTIONS
     . = ALIGN(4);
   } >ROM
 
+  /* Portes NSC : adresse fixe = SAU region 2 (partition_stm32n657xx.h START2/END2).
+   * Sans cela les .gnu.sgstubs se placent en fin d'image ROM et la SAU ne couvre pas
+   * les SG - appels depuis NS vers __cmse_nonsecure_entry faultent. */
+  . = 0x34001100;
+  .gnu.sgstubs :
+  {
+    _sNSCVeneer = .;
+    . = ALIGN(4);
+    *(.gnu.sgstubs*)
+    . = ALIGN(4);
+    _eNSCVeneer = .;
+  } >ROM
+
   /* The program code and other data into "ROM" Rom type memory */
   .text :
   {
@@ -154,15 +167,6 @@ SECTIONS
     . = ALIGN(8);
     __enoncacheable = .;  /* create symbol for end of section */
   } > RAM
-
-  .gnu.sgstubs :
-  {
-    _sNSCVeneer = .;
-    . = ALIGN(4);
-    *(.gnu.sgstubs*)   /* Secure Gateway stubs */
-    . = ALIGN(4);
-  } >ROM
-  _eNSCVeneer = .;
 
   /* Uninitialized data section into "RAM" Ram type memory */
   . = ALIGN(4);

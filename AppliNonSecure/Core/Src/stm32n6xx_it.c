@@ -22,7 +22,10 @@
 #include "stm32n6xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "ns_diag_config.h"
+#if !NS_DIAG_NO_LVGL
 #include "lvgl_port.h"
+#endif
 
 /* Fault diagnostic : UART print + blink pattern on LEDs (CMSIS direct) */
 static void fault_uart_print(const char *s)
@@ -189,7 +192,9 @@ void SysTick_Handler(void)
   /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();
   /* USER CODE BEGIN SysTick_IRQn 1 */
+#if !NS_DIAG_NO_LVGL
   lv_port_tick_inc(1);
+#endif
   /* USER CODE END SysTick_IRQn 1 */
 }
 

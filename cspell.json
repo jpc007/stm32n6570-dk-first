@@ -127,6 +127,7 @@
     "ThirdParty/**",
     "**/Debug/**",
     "compile_commands.json",
+    "*.md",
     "*.ld",
     "*.launch",
     "*.list",

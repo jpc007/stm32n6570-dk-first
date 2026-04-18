@@ -68,13 +68,10 @@ void HAL_MspInit(void)
 
   /* System interrupt init*/
 
-  HAL_PWREx_EnableVddIO2();
-
-  HAL_PWREx_EnableVddIO3();
-
-  HAL_PWREx_EnableVddIO4();
-
-  HAL_PWREx_EnableVddIO5();
+  /* Pas de HAL_PWREx_EnableVddIOx() ici : PWR reste souvent attribue Secure (RIF)
+   * alors que RCC est deja ouvert au NS via PUBCFGR — un acces NS a PWR->SVMCRx
+   * declenche un SecureFault dans HAL_Init(). AppliSecure a deja valide VDDIO2..5
+   * avant le saut vers le monde NonSecure. */
 
   /* USER CODE BEGIN MspInit 1 */
 
@@ -90,22 +87,13 @@ void HAL_MspInit(void)
 void HAL_UART_MspInit(UART_HandleTypeDef* huart)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
-  RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
   if(huart->Instance==USART2)
   {
     /* USER CODE BEGIN USART2_MspInit 0 */
 
     /* USER CODE END USART2_MspInit 0 */
 
-  /** Initializes the peripherals clock
-  */
-    PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_USART2;
-    PeriphClkInitStruct.Usart2ClockSelection = RCC_USART2CLKSOURCE_CLKP;
-    if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
-    {
-      Error_Handler();
-    }
-
+    /* Kernel clock USART2 : deja FSBL (CLKP). Pas HAL_RCCEx_PeriphCLKConfig (NS/CCIPR). */
     /* Peripheral clock enable */
     __HAL_RCC_USART2_CLK_ENABLE();
 

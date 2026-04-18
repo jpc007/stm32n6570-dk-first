@@ -21,10 +21,14 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "ns_diag_config.h"
+#if !NS_DIAG_NO_LVGL
 #include "lvgl_port.h"
-#include "framebuffer_ns.h"
 #include "lvgl.h"
+#endif
+#include "secure_nsc.h"
 #include <string.h>
+/* SCB_InvalidateDCache_by_Addr : via CMSIS dans stm32n6xx.h (main.h) */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -154,6 +158,68 @@ static void DBG_PrintHex32(uint32_t v)
   DBG_Print(buf);
 }
 
+/* Cause reset vue depuis NS (meme info que FSBL, utile si trace tronquee). */
+static void DBG_PrintResetCauseNs(void)
+{
+  const uint32_t r = RCC_NS->RSR;
+  /* FSBL efface souvent RMVF apres son trace : ici souvent 0, c'est normal. */
+  DBG_Print("[NS] RCC->RSR=");
+  DBG_PrintHex32(r);
+  DBG_Print(" [");
+  if ((r & RCC_RSR_LCKRSTF) != 0U) {
+    DBG_Print("LCKUP ");
+  }
+  if ((r & RCC_RSR_BORRSTF) != 0U) {
+    DBG_Print("BOR ");
+  }
+  if ((r & RCC_RSR_PINRSTF) != 0U) {
+    DBG_Print("NRST ");
+  }
+  if ((r & RCC_RSR_PORRSTF) != 0U) {
+    DBG_Print("POR ");
+  }
+  if ((r & RCC_RSR_SFTRSTF) != 0U) {
+    DBG_Print("SW ");
+  }
+  if ((r & RCC_RSR_IWDGRSTF) != 0U) {
+    DBG_Print("IWDG ");
+  }
+  if ((r & RCC_RSR_WWDGRSTF) != 0U) {
+    DBG_Print("WWDG ");
+  }
+  if ((r & RCC_RSR_LPWRRSTF) != 0U) {
+    DBG_Print("LPWR ");
+  }
+  DBG_Print("]\r\n");
+  if (r == 0U) {
+    DBG_Print("[NS] RSR=0 normal: FSBL efface RMVF apres trace; cause reelle = ligne [FSBL] Reset cause\r\n");
+  }
+}
+
+#if NS_DIAG_NO_LVGL
+/* Compare aux traces AppliSecure [7f3] si l'ecran reste noir : broches LTDC / PQ. */
+static void DBG_PrintLcdGpioSnapshot(void)
+{
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOE_CLK_ENABLE();
+  __HAL_RCC_GPIOG_CLK_ENABLE();
+  __HAL_RCC_GPIOQ_CLK_ENABLE();
+  DBG_Print("[NS] GPIO snap PB.MODER=");
+  DBG_PrintHex32(GPIOB_NS->MODER);
+  DBG_Print(" AFRH=");
+  DBG_PrintHex32(GPIOB_NS->AFR[1]);
+  DBG_Print(" PE.MODER=");
+  DBG_PrintHex32(GPIOE_NS->MODER);
+  DBG_Print(" PG.MODER=");
+  DBG_PrintHex32(GPIOG_NS->MODER);
+  DBG_Print(" PG.ODR=");
+  DBG_PrintHex32(GPIOG_NS->ODR);
+  DBG_Print(" PQ.ODR=");
+  DBG_PrintHex32(GPIOQ_NS->ODR);
+  DBG_Print(" (attendu ~ PB MODER 0xAABFFAEF AFRH 0xEEEEE000)\r\n");
+}
+#endif
+
 /* USER CODE END 0 */
 
 /**
@@ -174,17 +240,25 @@ int main(void)
     }
   }
 
-  /* ==== EARLY DIAG : LED BLANC = "NS main() atteint" ==== */
-  RCC->AHB4ENR |= RCC_AHB4ENR_GPIOEEN;  /* horloge GPIOE */
-  __DSB();
-  GPIOE_NS->MODER = (GPIOE_NS->MODER & ~(3UL << (13*2))) | (1UL << (13*2)); /* PE13 output */
-  GPIOE_NS->BSRR = (1UL << 13);  /* PE13 HIGH = BLANC ON */
+  /* NE PAS toucher RCC/GPIO avant HAL_Init() : sur N6+TZ cela peut corrompre
+   * l'init RCC interne -> fault dans LL_RCC (ex. MMFAR ~ 0x1043xxxx) et LEDs figees. */
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
   HAL_Init();
 
   /* USER CODE BEGIN Init */
+  /* LED blanche PE13 = NS vivant (apres HAL : horloges / attributs coherents) */
+  __HAL_RCC_GPIOE_CLK_ENABLE();
+  {
+    GPIO_InitTypeDef gi = {0};
+    gi.Pin   = GPIO_PIN_13;
+    gi.Mode  = GPIO_MODE_OUTPUT_PP;
+    gi.Pull  = GPIO_NOPULL;
+    gi.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOE, &gi);
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_13, GPIO_PIN_SET);
+  }
   /* Boot LEDs (VERT/JAUNE/ROUGE) gerees par FSBL + AppliSecure */
   /* USER CODE END Init */
 
@@ -199,42 +273,56 @@ int main(void)
   /* --- Debug board init (5 LEDs + USART2) --- */
   DBG_Board_Init();
   DBG_Print("\r\n=== [3/3 AppliNonSecure] Chenillard ===\r\n");
+  DBG_Print("[NS] BUILD=" __DATE__ " " __TIME__ "\r\n");
+  DBG_PrintResetCauseNs();
 
   /* LCD + LTDC sont deja initialises par AppliSecure (ecran blanc).
    * NS ne fait que lancer LVGL et le display driver. */
   DBG_Print("[2] LCD deja init par Secure\r\n");
 
+  /* PQ3/PQ6 = LCD_ON + backlight (RIF NSEC). Sans horloge ou si ODR retombe LOW,
+   * l'image peut etre correcte mais invisible — reaffirmer avant test NSC. */
+  __HAL_RCC_GPIOQ_CLK_ENABLE();
+  HAL_GPIO_WritePin(GPIOQ, GPIO_PIN_3, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOQ, GPIO_PIN_6, GPIO_PIN_SET);
+
+#if NS_DIAG_NO_LVGL
+  DBG_PrintLcdGpioSnapshot();
+#endif
+
+  /* Test NSC : rouge = remplissage FB en monde Secure via CMSE (pas LVGL). */
+  DBG_Print("[4a] NSC plein ecran rouge RGB565 0xF800\r\n");
+  SECURE_LtdcFbFillRgb565(0xF800U);
+  HAL_Delay(400U);
+
+#if NS_DIAG_NO_LVGL
+  DBG_Print("[NS-DIAG] LVGL OFF (ns_diag_config.h) - NSC display only\r\n");
+  DBG_Print("[5] Boucle main (rouge NSC rafraichi toutes les 5 s)...\r\n");
+#else
   DBG_Print("[3] LVGL init...\r\n");
   lv_port_init();
   DBG_Print("[4] LVGL OK\r\n");
 
-  /* Diagnostic LTDC AVANT tout rendu LVGL — confirme que le Secure a pris. */
-  DBG_Print("LTDC diag: CFBAR=");
+  /* Sans ca, le 1er rafraichissement LVGL repeint le FB en noir (fond ecran defaut).
+   * Le rouge [4a] disparait alors que LTDC+NSC sont OK. */
+  {
+    lv_display_t *const d = lv_display_get_default();
+    if (d != NULL) {
+      lv_obj_t *const scr = lv_display_get_screen_active(d);
+      if (scr != NULL) {
+        lv_obj_set_style_bg_color(scr, lv_color_hex(0xF800), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
+      }
+    }
+  }
+  (void)lv_timer_handler();
+
+  DBG_Print("[4b] LTDC NS diag (souvent 0 en TZ) CFBAR=");
   DBG_PrintHex32(LTDC_Layer1_NS->CFBAR);
-  DBG_Print(" GCR=");
-  DBG_PrintHex32(LTDC_NS->GCR);
-  DBG_Print(" CR=");
-  DBG_PrintHex32(LTDC_Layer1_NS->CR);
-  DBG_Print(" WHPCR=");
-  DBG_PrintHex32(LTDC_Layer1_NS->WHPCR);
   DBG_Print("\r\n");
 
-  /* Lire un pixel du FB pour confirmer que la SRAM3 est accessible et contient du blanc.
-   * Note : RCC_NS->MEMENR peut retourner 0 si PUBCFGR non configure, meme
-   * si SRAM3 est reellement actif. On tente la lecture directe. */
-  {
-    volatile uint16_t *fb = (volatile uint16_t *)0x24200000UL;
-    DBG_Print("FB[0]=");
-    DBG_PrintHex32((uint32_t)fb[0]);
-    DBG_Print(" FB[1000]=");
-    DBG_PrintHex32((uint32_t)fb[1000]);
-    DBG_Print(" (attendu FFFF)\r\n");
-  }
-
-  /* PAS de lv_refr_now() — le FB est deja blanc depuis Secure.
-   * Le lv_timer_handler() dans la boucle fera le premier rendu LVGL.
-   * Si l'ecran est TOUJOURS noir ici, le probleme est LTDC/panel, pas LVGL. */
   DBG_Print("[5] Boucle main...\r\n");
+#endif
 
   /* USER CODE END 2 */
 
@@ -244,6 +332,10 @@ int main(void)
   uint32_t hello_tick      = 0;
   uint32_t hello_count     = 0;
   int      chenillard_idx  = 0;
+#if NS_DIAG_NO_LVGL
+  uint32_t nsc_red_tick = 0;
+  uint32_t nsc_color_phase = 0;
+#endif
 
   /* Allumer la premiere LED du chenillard */
   DBG_LED_ON(led_port[0], led_pin[0]);
@@ -253,12 +345,24 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+#if !NS_DIAG_NO_LVGL
     lv_timer_handler();
+#endif
 
     uint32_t now = HAL_GetTick();
 
-    /* --- Chenillard : une LED a la fois, avance toutes les 150 ms --- */
-    if (now - chenillard_tick >= 150U)
+#if NS_DIAG_NO_LVGL
+    /* Rouge / vert alternes : si vous voyez les couleurs changer, LTDC+FB+NSC OK (panneau). */
+    if ((now - nsc_red_tick) >= 5000U) {
+      nsc_red_tick = now;
+      const uint16_t c = ((nsc_color_phase++ & 1U) != 0U) ? 0xF800U : 0x07E0U;
+      SECURE_LtdcFbFillRgb565(c);
+      DBG_Print((c == 0xF800U) ? "[NS] NSC fill RED\r\n" : "[NS] NSC fill GREEN\r\n");
+    }
+#endif
+
+    /* --- Chenillard : une LED a la fois (~120 ms = lisible, pas "hyper rapide") --- */
+    if (now - chenillard_tick >= 120U)
     {
       chenillard_tick = now;
       DBG_LED_OFF(led_port[chenillard_idx], led_pin[chenillard_idx]);
@@ -354,7 +458,15 @@ static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE BEGIN MX_GPIO_Init_1 */
-
+#if NS_DIAG_NO_LVGL
+  /* Ne pas reconfigurer les GPIO LTDC du .ioc NS : mapping != BSP Secure (AppliSecure
+   * section 7a : PA/PB/PD/PE/PG/PH + PB13 CLK). Un MX_GPIO_Init complet casse l'AF
+   * deja valide -> ecran noir malgre SECURE_LtdcFbFillRgb565. */
+  __HAL_RCC_GPIOQ_CLK_ENABLE();
+  HAL_GPIO_WritePin(GPIOQ, GPIO_PIN_3, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOQ, GPIO_PIN_6, GPIO_PIN_SET);
+  return;
+#endif
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */

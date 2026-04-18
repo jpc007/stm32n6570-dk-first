@@ -131,12 +131,15 @@
 /*
 //     <o>Start Address <0-0xFFFFFFE0>
 */
-#define SAU_INIT_START2     0x34001100      /* NSC veneer area (Secure Gateway stubs) */
+/* Les stubs CMSE (.gnu.sgstubs) sont lies AVANT le .text secure (ex. 0x34000760–0x3400077F).
+ * Une region NSC qui commence a 0x34001100 NE couvre PAS les SG → premier appel NSC = INVEP (SFSR=1).
+ * Verifier apres lien : arm-none-eabi-objdump -d first_AppliSecure.elf --section=.gnu.sgstubs */
+#define SAU_INIT_START2     0x34000760
 
 /*
 //     <o>End Address <0x1F-0xFFFFFFFF>
 */
-#define SAU_INIT_END2       0x3400117F      /* end of veneer area */
+#define SAU_INIT_END2       0x3400077F      /* fin des 4 entrees SG (32 octets) */
 
 /*
 //     <o>Region is

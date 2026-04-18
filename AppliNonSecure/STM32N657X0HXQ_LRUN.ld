@@ -46,9 +46,6 @@ MEMORY
 {
   ROM    (xrw)    : ORIGIN = 0x24100400,   LENGTH = 511K
   RAM    (xrw)    : ORIGIN = 0x24180000,   LENGTH = 512K
-  /* SRAM1 NS : seulement ~0x400 Ko (FLEXRAM) puis Secure @ 0x24064000 — un FB 800x480
-   * depasse la zone NS => RISAF2 IADDR=0x24064000. SRAM3 est NS (SAU R1) + RISAF4 ouvert. */
-  FBRAM  (rw)     : ORIGIN = 0x24200000,   LENGTH = 768K
 }
 
 /* Sections */
@@ -173,18 +170,6 @@ SECTIONS
     _ebss = .;         /* define a global symbol at bss end */
     __bss_end__ = _ebss;
   } >RAM
-
-  /* LTDC framebuffer en SRAM3 — KEEP : sinon --gc-sections supprime la section (taille 0, ASSERT). */
-  .framebuffer (NOLOAD) :
-  {
-    . = ALIGN(64);
-    _fb_start = .;
-    KEEP(*(.framebuffer))
-    KEEP(*(.framebuffer*))
-    _fb_end = .;
-  } >FBRAM
-
-  ASSERT((_fb_end - _fb_start) == 768000, "NS .framebuffer doit faire 768000 octets (voir KEEP ci-dessus)")
 
   /* User_heap_stack section, used to check that there is enough "RAM" Ram  type memory left */
   ._user_heap_stack :

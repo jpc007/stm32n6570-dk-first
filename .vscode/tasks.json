@@ -23,7 +23,8 @@
             "presentation": {
                 "reveal": "always",
                 "panel": "shared",
-                "clear": true
+                "clear": false,
+                "showReuseMessage": false
             }
         },
         {
@@ -128,7 +129,8 @@
             "presentation": {
                 "reveal": "always",
                 "panel": "shared",
-                "clear": true
+                "clear": false,
+                "showReuseMessage": false
             }
         },
         {
@@ -150,7 +152,8 @@
             "presentation": {
                 "reveal": "always",
                 "panel": "shared",
-                "clear": true
+                "clear": false,
+                "showReuseMessage": false
             }
         },
         {

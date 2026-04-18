@@ -21,6 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "stm32n6xx_hal_ltdc.h"
 #include "stm32n6xx_hal_rif.h"
 #include <string.h>
 /* USER CODE END Includes */
@@ -33,6 +34,17 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define APPLI_SECURE_ADDR  0x34000400U   /* AppliSecure vector table in SRAM1 */
+
+/* RK050HR18 + FB — meme constantes que milestone git 862acf5 (FSBL LCD rouge HAL). */
+#define FSBL_LCD_WIDTH   800U
+#define FSBL_LCD_HEIGHT  480U
+#define FSBL_LCD_HSYNC   4U
+#define FSBL_LCD_HBP     4U
+#define FSBL_LCD_HFP     4U
+#define FSBL_LCD_VSYNC   4U
+#define FSBL_LCD_VBP     4U
+#define FSBL_LCD_VFP     4U
+#define FSBL_FB_ADDRESS  0x34200000U    /* SRAM3 alias Secure (LTDC DMA) */
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -62,6 +74,7 @@ XSPI_HandleTypeDef hxspi1;
 XSPI_HandleTypeDef hxspi2;
 
 /* USER CODE BEGIN PV */
+LTDC_HandleTypeDef       hltdc;
 static UART_HandleTypeDef huart2;
 /* USER CODE END PV */
 
@@ -86,7 +99,10 @@ static void Security_Config(void);
 static void SRAM_Enable(void);
 static void USART2_Init(void);
 static void UART_Print(const char *msg);
+static void UART_PrintResetCause(void);
 static void Jump_To_AppliSecure(void);
+static void FSBL_LTDC_ClockConfig(void);
+static void FSBL_LTDC_Init_Red_Milestone862acf5(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -109,6 +125,42 @@ static void UART_PrintHex32(uint32_t v)
   }
   h[8] = '\0';
   UART_Print(h);
+}
+
+/* Cause du reset precedent (RCC->RSR) — utile quand la trace reprend au FSBL apres long run NS */
+static void UART_PrintResetCause(void)
+{
+  const uint32_t r = RCC->RSR;
+  UART_Print("[FSBL] Reset cause RCC->RSR=0x");
+  UART_PrintHex32(r);
+  UART_Print(" [");
+  if ((r & RCC_RSR_LCKRSTF) != 0U) {
+    UART_Print("LCKUP ");
+  }
+  if ((r & RCC_RSR_BORRSTF) != 0U) {
+    UART_Print("BOR ");
+  }
+  if ((r & RCC_RSR_PINRSTF) != 0U) {
+    UART_Print("NRST ");
+  }
+  if ((r & RCC_RSR_PORRSTF) != 0U) {
+    UART_Print("POR ");
+  }
+  if ((r & RCC_RSR_SFTRSTF) != 0U) {
+    UART_Print("SW ");
+  }
+  if ((r & RCC_RSR_IWDGRSTF) != 0U) {
+    UART_Print("IWDG ");
+  }
+  if ((r & RCC_RSR_WWDGRSTF) != 0U) {
+    UART_Print("WWDG ");
+  }
+  if ((r & RCC_RSR_LPWRRSTF) != 0U) {
+    UART_Print("LPWR ");
+  }
+  UART_Print("]\r\n");
+  /* Effacer pour le prochain cycle (RM : bit RMVF) */
+  RCC->RSR |= RCC_RSR_RMVF;
 }
 
 /* ------------------------------------------------------------------ */
@@ -141,6 +193,156 @@ static void USART2_Init(void)
   huart2.Init.HwFlowCtl    = UART_HWCONTROL_NONE;
   huart2.Init.OverSampling = UART_OVERSAMPLING_16;
   HAL_UART_Init(&huart2);
+}
+
+/* ------------------------------------------------------------------ */
+/* LTDC pixel clock — meme principe que milestone 862acf5 :
+ *   IC16 source PLL4, div 24  => 600 MHz / 24 = 25 MHz (RK050HR18)    */
+/* ------------------------------------------------------------------ */
+static void FSBL_LTDC_ClockConfig(void)
+{
+  RCC_PeriphCLKInitTypeDef pclk = {0};
+
+  pclk.PeriphClockSelection                   = RCC_PERIPHCLK_LTDC;
+  pclk.LtdcClockSelection                     = RCC_LTDCCLKSOURCE_IC16;
+  pclk.ICSelection[RCC_IC16].ClockSelection     = RCC_ICCLKSOURCE_PLL4;
+  pclk.ICSelection[RCC_IC16].ClockDivider     = 24U;
+  if (HAL_RCCEx_PeriphCLKConfig(&pclk) != HAL_OK) {
+    UART_Print("[FSBL-LTDC] RCC IC16 FAILED\r\n");
+  }
+}
+
+/* HAL_LTDC_MspInit — copie fonctionnelle du FSBL @862acf5 (BSP RK050) */
+void HAL_LTDC_MspInit(LTDC_HandleTypeDef *hltdc_arg)
+{
+  GPIO_InitTypeDef gpio = {0};
+  (void)hltdc_arg;
+
+  __HAL_RCC_LTDC_CLK_ENABLE();
+  __HAL_RCC_LTDC_FORCE_RESET();
+  __HAL_RCC_LTDC_RELEASE_RESET();
+
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
+  __HAL_RCC_GPIOE_CLK_ENABLE();
+  __HAL_RCC_GPIOG_CLK_ENABLE();
+  __HAL_RCC_GPIOH_CLK_ENABLE();
+  __HAL_RCC_GPIOQ_CLK_ENABLE();
+
+  gpio.Mode      = GPIO_MODE_AF_PP;
+  gpio.Pull      = GPIO_NOPULL;
+  gpio.Speed     = GPIO_SPEED_FREQ_HIGH;
+  gpio.Alternate = GPIO_AF14_LCD;
+
+  gpio.Pin = GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_7 | GPIO_PIN_8 | GPIO_PIN_15;
+  HAL_GPIO_Init(GPIOA, &gpio);
+
+  gpio.Pin = GPIO_PIN_2 | GPIO_PIN_4 | GPIO_PIN_11 | GPIO_PIN_12 | GPIO_PIN_13 | GPIO_PIN_14 | GPIO_PIN_15;
+  HAL_GPIO_Init(GPIOB, &gpio);
+
+  gpio.Pin = GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_15;
+  HAL_GPIO_Init(GPIOD, &gpio);
+
+  gpio.Pin = GPIO_PIN_11;
+  HAL_GPIO_Init(GPIOE, &gpio);
+
+  gpio.Pin = GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_6 | GPIO_PIN_8 | GPIO_PIN_11 | GPIO_PIN_12;
+  HAL_GPIO_Init(GPIOG, &gpio);
+
+  gpio.Pin = GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_6;
+  HAL_GPIO_Init(GPIOH, &gpio);
+
+  __HAL_RCC_GPIOP_CLK_ENABLE();
+  gpio.Pin = GPIO_PIN_15;
+  HAL_GPIO_Init(GPIOP, &gpio);
+
+  gpio.Mode = GPIO_MODE_OUTPUT_PP;
+  gpio.Speed = GPIO_SPEED_FREQ_LOW;
+
+  gpio.Pin = GPIO_PIN_1;
+  HAL_GPIO_Init(GPIOE, &gpio);
+  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_RESET);
+  HAL_Delay(10);
+  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_1, GPIO_PIN_SET);
+  HAL_Delay(10);
+
+  gpio.Pin = GPIO_PIN_3;
+  HAL_GPIO_Init(GPIOQ, &gpio);
+  HAL_GPIO_WritePin(GPIOQ, GPIO_PIN_3, GPIO_PIN_SET);
+
+  gpio.Pin = GPIO_PIN_13;
+  HAL_GPIO_Init(GPIOG, &gpio);
+  HAL_GPIO_WritePin(GPIOG, GPIO_PIN_13, GPIO_PIN_SET);
+
+  gpio.Pin = GPIO_PIN_6;
+  HAL_GPIO_Init(GPIOQ, &gpio);
+  HAL_GPIO_WritePin(GPIOQ, GPIO_PIN_6, GPIO_PIN_SET);
+}
+
+/* HAL_LTDC + FB rouge — aligne milestone 862acf5 */
+static void FSBL_LTDC_Init_Red_Milestone862acf5(void)
+{
+  LTDC_LayerCfgTypeDef layer = {0};
+
+  hltdc.Instance = LTDC;
+  hltdc.Init.HSPolarity = LTDC_HSPOLARITY_AL;
+  hltdc.Init.VSPolarity = LTDC_VSPOLARITY_AL;
+  hltdc.Init.DEPolarity = LTDC_DEPOLARITY_AL;
+  hltdc.Init.PCPolarity = LTDC_PCPOLARITY_IPC;
+
+  hltdc.Init.HorizontalSync     = FSBL_LCD_HSYNC - 1U;
+  hltdc.Init.AccumulatedHBP     = FSBL_LCD_HSYNC + FSBL_LCD_HBP - 1U;
+  hltdc.Init.AccumulatedActiveW = FSBL_LCD_HSYNC + FSBL_LCD_WIDTH + FSBL_LCD_HBP - 1U;
+  hltdc.Init.TotalWidth         = FSBL_LCD_HSYNC + FSBL_LCD_WIDTH + FSBL_LCD_HBP + FSBL_LCD_HFP - 1U;
+  hltdc.Init.VerticalSync       = FSBL_LCD_VSYNC - 1U;
+  hltdc.Init.AccumulatedVBP     = FSBL_LCD_VSYNC + FSBL_LCD_VBP - 1U;
+  hltdc.Init.AccumulatedActiveH = FSBL_LCD_VSYNC + FSBL_LCD_HEIGHT + FSBL_LCD_VBP - 1U;
+  hltdc.Init.TotalHeigh         = FSBL_LCD_VSYNC + FSBL_LCD_HEIGHT + FSBL_LCD_VBP + FSBL_LCD_VFP - 1U;
+
+  hltdc.Init.Backcolor.Blue  = 0;
+  hltdc.Init.Backcolor.Green = 0;
+  hltdc.Init.Backcolor.Red   = 0;
+
+  if (HAL_LTDC_Init(&hltdc) != HAL_OK) {
+    UART_Print("[FSBL-LTDC] HAL_LTDC_Init FAILED\r\n");
+    return;
+  }
+  UART_Print("[FSBL-LTDC] HAL_LTDC_Init OK\r\n");
+
+  layer.WindowX0        = 0;
+  layer.WindowX1      = FSBL_LCD_WIDTH;
+  layer.WindowY0        = 0;
+  layer.WindowY1      = FSBL_LCD_HEIGHT;
+  layer.PixelFormat     = LTDC_PIXEL_FORMAT_RGB565;
+  layer.Alpha           = 255;
+  layer.Alpha0          = 0;
+  layer.BlendingFactor1 = LTDC_BLENDING_FACTOR1_CA;
+  layer.BlendingFactor2 = LTDC_BLENDING_FACTOR2_CA;
+  layer.FBStartAdress   = FSBL_FB_ADDRESS;
+  layer.ImageWidth      = FSBL_LCD_WIDTH;
+  layer.ImageHeight     = FSBL_LCD_HEIGHT;
+  layer.Backcolor.Blue  = 0;
+  layer.Backcolor.Green = 0;
+  layer.Backcolor.Red   = 0;
+
+  if (HAL_LTDC_ConfigLayer(&hltdc, &layer, 0) != HAL_OK) {
+    UART_Print("[FSBL-LTDC] ConfigLayer FAILED\r\n");
+    return;
+  }
+  UART_Print("[FSBL-LTDC] Layer0 OK FB=0x34200000\r\n");
+
+  {
+    volatile uint16_t *fb = (volatile uint16_t *)FSBL_FB_ADDRESS;
+    const uint32_t       n = FSBL_LCD_WIDTH * FSBL_LCD_HEIGHT;
+    for (uint32_t i = 0; i < n; i++) {
+      fb[i] = 0xF800U;
+    }
+    __DSB();
+  }
+  UART_Print("[FSBL-LTDC] FB rempli ROUGE (RGB565 0xF800) comme 862acf5\r\n");
+
+  __HAL_LTDC_ENABLE(&hltdc);
 }
 
 /* ------------------------------------------------------------------ */
@@ -287,10 +489,10 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   /* ============================================================
-   * PHASE 2a — FSBL : init + jump to AppliSecure
+   * PHASE 2a — FSBL : LCD ROUGE HAL (milestone git 862acf5), puis AppliSecure
    *
-   * LED VERTE = preuve que le FSBL a tourne.
-   * Pas d'init LCD ici — c'est AppliSecure qui fait le LTDC.
+   * LED VERTE = FSBL OK. LCD rouge = meme pipeline HAL+FB@0x34200000 que la
+   * milestone; pause 3 s pour verifier avant le saut Secure.
    * ============================================================ */
   {
     /* LED verte (PD0) */
@@ -306,6 +508,7 @@ int main(void)
 
   USART2_Init();
   UART_Print("\r\n=== [1/3 FSBL] Phase 2a ===\r\n");
+  UART_PrintResetCause();
 
   Security_Config();
   UART_Print("[OK] Security_Config\r\n");
@@ -326,6 +529,12 @@ int main(void)
   UART_Print(" ");
   UART_PrintHex32(*(volatile uint32_t *)0x34100404);
   UART_Print("\r\n");
+
+  UART_Print("[FSBL] LCD HAL ref 862acf5 (ROUGE)...\r\n");
+  FSBL_LTDC_ClockConfig();
+  FSBL_LTDC_Init_Red_Milestone862acf5();
+  UART_Print("[FSBL] Pause 3s - ecran ROUGE - puis saut AppliSecure\r\n");
+  HAL_Delay(3000);
 
   UART_Print("[1/3 FSBL] -> AppliSecure\r\n");
   Jump_To_AppliSecure();

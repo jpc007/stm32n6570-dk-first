@@ -11,12 +11,12 @@
  * LTDC sont deja faits dans AppliSecure/FSBL (RCC Secure). Un reset NS mal relache
  * laisse le LTDC mort : acces aux registres = bus bloque, ST-LINK perd la cible.
  *
- * Framebuffer : section .framebuffer / SRAM3 (linker FBRAM).
+ * Pixels : copie NSC vers le framebuffer Secure 0x34200000 (le LTDC ne lit pas l'alias NS 0x24200000).
  */
 
 #include "lv_port_disp_ltdc.h"
-#include "framebuffer_ns.h"
 #include "main.h"
+#include "secure_nsc.h" /* SECURE_LtdcFbRect_t */
 #include "lvgl.h"
 #include "core/lv_refr.h"
 #include "rk050hr18.h"
@@ -38,9 +38,6 @@ static void ltdc_boot_trace(const char *msg)
 
 #define LTDC_PF_RGB565  2U
 #define BYTES_PER_PX    2U
-
-static uint16_t framebuffer[DISP_HOR_RES * DISP_VER_RES]
-    __attribute__((aligned(64), section(".framebuffer")));
 
 #define RENDER_LINES   20
 static uint8_t render_buf1[DISP_HOR_RES * RENDER_LINES * BYTES_PER_PX]
@@ -130,9 +127,8 @@ void lv_port_ltdc_flush_fb_range(const void *addr, uint32_t nbytes)
 
 void lv_port_disp_init(void)
 {
-    /* LTDC est entierement programme par AppliSecure (alias _S) :
-     * GPIO AF14, LCD power/BL, timings, layer 1 -> 0x24200000, reload.
-     * NS n'a plus qu'a creer le display LVGL qui ecrit dans le framebuffer. */
+    /* LTDC est entierement programme par AppliSecure (alias _S), CFBAR_S = 0x34200000.
+     * LVGL dessine en SRAM2 ; chaque flush appelle SECURE_LtdcFbFlushRgb565 (NSC). */
     ltdc_boot_trace("  trace: LTDC deja init par Secure, skip HW init\r\n");
 
     lv_display_t *disp = lv_display_create(DISP_HOR_RES, DISP_VER_RES);
@@ -145,18 +141,29 @@ void lv_port_disp_init(void)
 
 static void disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
-    uint16_t *src = (uint16_t *)px_map;
     int32_t w = lv_area_get_width(area);
+    int32_t h = lv_area_get_height(area);
 
-    for (int32_t y = area->y1; y <= area->y2; y++) {
-        uint16_t *dst = &framebuffer[y * DISP_HOR_RES + area->x1];
-        for (int32_t x = 0; x < w; x++) {
-            dst[x] = src[x];
-        }
-        src += w;
+#if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
+    if (w > 0 && h > 0) {
+        SCB_CleanDCache_by_Addr((void *)px_map, (int32_t)((uint32_t)w * (uint32_t)h * BYTES_PER_PX));
+        __DSB();
+    }
+#else
+    (void)w;
+    (void)h;
+#endif
+
+    {
+      const SECURE_LtdcFbRect_t r = {
+          (uint16_t)area->x1,
+          (uint16_t)area->y1,
+          (uint16_t)area->x2,
+          (uint16_t)area->y2,
+      };
+      SECURE_LtdcFbFlushRgb565(&r, (const uint16_t *)px_map);
     }
 
-    lv_port_ltdc_flush_fb_range(framebuffer, ltdc_fb_size_bytes());
     lv_display_flush_ready(disp);
 }
 
@@ -229,7 +236,8 @@ static void ltdc_hw_init(void)
     /* PAxCA comme BSP (BF1=6 BF2=7) */
     layer->BFCR  = (0x06U << LTDC_LxBFCR_BF1_Pos) | (0x07U << LTDC_LxBFCR_BF2_Pos);
 
-    layer->CFBAR  = (uint32_t)(uintptr_t)&_fb_start;
+    /* Secure utilise 0x34200000 ; l'alias NS 0x24200000 n'est pas fiable pour le CPU NS. */
+    layer->CFBAR  = 0x34200000UL;
     layer->CFBLR  = ((w * BYTES_PER_PX) << 16) | ((w * BYTES_PER_PX) + 7U);
     layer->CFBLNR = h;
 

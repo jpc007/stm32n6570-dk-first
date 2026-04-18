@@ -40,6 +40,18 @@ SECURE_FAULT_CB_ID     = 0x00U, /*!< System secure fault callback ID */
 /* Exported functions ------------------------------------------------------- */
 void SECURE_RegisterCallback(SECURE_CallbackIDTypeDef CallbackId, void *func);
 
+/* LTDC : le CPU NS ne peut pas ecrire la SRAM3 via 0x24200000 (NoC) ; le LTDC lit 0x34200000.
+ * cmse_nonsecure_entry : pas d'arguments sur la pile — seulement rect + ns_src (2 registres). */
+typedef struct {
+  uint16_t x1;
+  uint16_t y1;
+  uint16_t x2;
+  uint16_t y2;
+} SECURE_LtdcFbRect_t;
+
+void SECURE_LtdcFbFillRgb565(uint16_t color);
+void SECURE_LtdcFbFlushRgb565(const SECURE_LtdcFbRect_t *rect, const uint16_t *ns_src);
+
 #endif /* SECURE_NSC_H */
 /* USER CODE END Non_Secure_CallLib_h */
 

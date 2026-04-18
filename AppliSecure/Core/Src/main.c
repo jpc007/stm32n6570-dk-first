@@ -101,7 +101,8 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   /* ============================================================
-   * BOOT STAGE 2 : LED JAUNE (PE9) 3s, puis LED ROUGE (PH5) 3s
+   * BOOT STAGE 2 : LED JAUNE (PE9) puis LED ROUGE (PH5) — pauses courtes
+   * (meme idee que la pause ecran FSBL, plus rapide sur les LED).
    * USART2 configure par FSBL (registres persistent apres jump).
    * SysTick tourne (HAL_SuspendTick pas encore appele).
    * ============================================================ */
@@ -117,7 +118,7 @@ int main(void)
     HAL_GPIO_WritePin(GPIOE, GPIO_PIN_9, GPIO_PIN_SET);
 
     boot_trace("=== [2/3 AppliSecure] LED JAUNE ===\r\n");
-    HAL_Delay(500);
+    HAL_Delay(200);
     HAL_GPIO_WritePin(GPIOE, GPIO_PIN_9, GPIO_PIN_RESET);
 
     /* LED ROUGE (PH5) — GPIOH clock deja ON (SystemIsolation_Config) */
@@ -126,7 +127,7 @@ int main(void)
     HAL_GPIO_WritePin(GPIOH, GPIO_PIN_5, GPIO_PIN_SET);
 
     boot_trace("=== [2/3 AppliSecure] LED ROUGE ===\r\n");
-    HAL_Delay(500);
+    HAL_Delay(200);
     HAL_GPIO_WritePin(GPIOH, GPIO_PIN_5, GPIO_PIN_RESET);
 
     boot_trace("=== [2/3 AppliSecure] -> NonSecure ===\r\n");
@@ -419,10 +420,6 @@ void PeriphCommonClock_Config(void)
     ltdc_master.SecPriv   = RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV;
     HAL_RIF_RIMC_ConfigMasterAttributes(RIF_MASTER_INDEX_LTDC1, &ltdc_master);
     HAL_RIF_RIMC_ConfigMasterAttributes(RIF_MASTER_INDEX_LTDC2, &ltdc_master);
-    /* Bit 31 : maitre vu comme « DMA » par le RIF — requis pour que RISAF autorise
-     * les lectures LTDC vers la SRAM ; HAL_RIF_RIMC_ConfigMasterAttributes ne le pose pas. */
-    RIFSC->RIMC_ATTRx[RIF_MASTER_INDEX_LTDC1] |= (1UL << 31);
-    RIFSC->RIMC_ATTRx[RIF_MASTER_INDEX_LTDC2] |= (1UL << 31);
     __DSB();
   }
 
@@ -815,7 +812,7 @@ void PeriphCommonClock_Config(void)
 
     layer->WHPCR  = (h_start << 0) | (h_stop << 16);
     layer->WVPCR  = (v_start << 0) | (v_stop << 16);
-    layer->PFCR   = 2U;           /* RGB565 */
+    layer->PFCR   = 4U;           /* RGB565 sur N6 (PF=4, pas 2 comme ancien STM32!) */
     layer->CACR   = 0xFFU;        /* alpha constant = opaque */
     layer->DCCR   = 0x00000000U;
     layer->BFCR   = (0x06U << LTDC_LxBFCR_BF1_Pos) | (0x07U << LTDC_LxBFCR_BF2_Pos);
@@ -827,7 +824,12 @@ void PeriphCommonClock_Config(void)
     {
       volatile uint32_t cfbar_chk = LTDC_Layer1_S->CFBAR;
       volatile uint32_t whpcr_chk = LTDC_Layer1_S->WHPCR;
+      volatile uint32_t pfcr_chk  = LTDC_Layer1_S->PFCR;
       volatile uint32_t cr_chk    = LTDC_Layer1_S->CR;
+      (void)cr_chk;
+      boot_trace("[7c] PFCR=0x");
+      { uint32_t v=pfcr_chk; char h[9]; for(int i=7;i>=0;i--){uint8_t n=(v>>(i*4))&0xF; h[7-i]=n<10?'0'+n:'A'+n-10;} h[8]=0; boot_trace(h); }
+      boot_trace(" (4=RGB565)\r\n");
       boot_trace("[7c] CFBAR=0x");
       { char h[9]; for(int i=7;i>=0;i--){uint8_t n=(cfbar_chk>>(i*4))&0xF; h[7-i]=n<10?'0'+n:'A'+n-10;} h[8]=0; boot_trace(h); }
       boot_trace(" WHPCR=0x");
@@ -931,6 +933,7 @@ void PeriphCommonClock_Config(void)
       /* Lire LTDC registres via S alias */
       volatile uint32_t gcr_s  = LTDC_S->GCR;
       volatile uint32_t srcr_s = LTDC_S->SRCR;
+      (void)srcr_s;
       volatile uint32_t cfbar_s = LTDC_Layer1_S->CFBAR;
       volatile uint32_t cr_s    = LTDC_Layer1_S->CR;
       volatile uint32_t whpcr_s = LTDC_Layer1_S->WHPCR;
@@ -1061,8 +1064,35 @@ void PeriphCommonClock_Config(void)
     }
 
     /* Attendre 2s pour observer l'ecran avant le saut NS */
-    boot_trace("[7f2] Waiting 2s — observe screen...\r\n");
+    boot_trace("[7f2] Waiting 2s - observe screen...\r\n");
     HAL_Delay(2000);
+  }
+
+  /* [7f4] Demo visuelle 100 % Secure (meme FB @0x34200000 que le LTDC).
+   *      Si aucune couleur pendant 3 s : panneau / timings / signalisation,
+   *      pas LVGL ni le NSC. Si OK : la chaine LTDC+RAM+panneau est saine. */
+  {
+    volatile uint16_t *fb = (volatile uint16_t *)0x34200000UL;
+    const uint32_t       W = 800U;
+    const uint32_t       H = 480U;
+    const uint16_t       cols[4] = {0xF800U, 0x07E0U, 0x001FU, 0xFFE0U}; /* R G B Jaune */
+    uint32_t             band = H / 4U;
+
+    if (band == 0U) {
+      band = 1U;
+    }
+    for (uint32_t y = 0; y < H; y++) {
+      uint16_t c   = cols[(y / band) & 3U];
+      uint32_t row = y * W;
+      for (uint32_t x = 0; x < W; x++) {
+        fb[row + x] = c;
+      }
+    }
+    __DSB();
+    LTDC_S->BCCR = 0x00000000U;
+    __DSB();
+    boot_trace("[7f4] DEMO bandes RGBY sur FB Secure 3s\r\n");
+    HAL_Delay(3000);
   }
 
   /* 7g) LTDC reste SEC : le DMA LTDC fonctionne en SEC+PRIV pour acceder

@@ -4,9 +4,9 @@
  */
 
 #include "ltdc_visual_test.h"
-#include "framebuffer_ns.h"
 #include "lv_port_disp_ltdc.h"
 #include "main.h"
+#include "secure_nsc.h"
 
 #define TVT_W     800U
 #define TVT_H     480U
@@ -41,29 +41,30 @@ static void ltdc_reload_shadow(void)
 
 static void fb_fill_solid(uint16_t color)
 {
-  volatile uint16_t *fb = (volatile uint16_t *)(uintptr_t)&_fb_start;
-  for (uint32_t i = 0; i < TVT_PIX; i++) {
-    fb[i] = color;
-  }
-  __DSB();
-  lv_port_ltdc_flush_fb_range((const void *)&_fb_start, ltdc_fb_size_bytes());
+  SECURE_LtdcFbFillRgb565(color);
 }
 
 static void fb_fill_stripes(uint16_t c0, uint16_t c1, uint32_t band_h)
 {
-  volatile uint16_t *fb = (volatile uint16_t *)(uintptr_t)&_fb_start;
+  uint16_t row[TVT_W];
+
   if (band_h == 0U) {
     band_h = 60U;
   }
   for (uint32_t y = 0; y < TVT_H; y++) {
     uint16_t c = ((y / band_h) & 1U) ? c1 : c0;
-    uint32_t row = y * TVT_W;
     for (uint32_t x = 0; x < TVT_W; x++) {
-      fb[row + x] = c;
+      row[x] = c;
+    }
+#if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
+    SCB_CleanDCache_by_Addr((void *)row, (int32_t)sizeof(row));
+    __DSB();
+#endif
+    {
+      const SECURE_LtdcFbRect_t r = {0U, (uint16_t)y, (uint16_t)(TVT_W - 1U), (uint16_t)y};
+      SECURE_LtdcFbFlushRgb565(&r, row);
     }
   }
-  __DSB();
-  lv_port_ltdc_flush_fb_range((const void *)&_fb_start, ltdc_fb_size_bytes());
 }
 
 static void layer_set_enable(int on)

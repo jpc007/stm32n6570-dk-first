@@ -1,16 +1,48 @@
 # État du projet « first » — STM32N6570-DK
 
-**Dernière mise à jour : 2026-04-06 (session 12)**
+**Dernière mise à jour : 2026-04-18 (session 16)**
 
-## ÉCRAN LCD ROUGE — FONCTIONNEL ✅ (Phase 1) | Phase 2 TrustZone — ÉCRAN NOIR ❌ | GDB DEBUG — FONCTIONNEL ✅
+## ÉCRAN LCD ROUGE — FONCTIONNEL ✅ (Phase 1 / FSBL) | Phase 2 TrustZone — ÉCRAN NOIR ❌ (AppliSecure path) | Chaîne NS — Chenillard + UART ✅ (après fix HAL) | GDB DEBUG — FONCTIONNEL ✅ | VS Code IntelliSense — FONCTIONNEL ✅ | Dual-IDE Build — FONCTIONNEL ✅
 
-**Dernières évolutions (session 12 du 2026-04-06, soir) :**
+**Dernières évolutions (session 16 du 2026-04-18) :**
+- **Écran rouge « de retour » en Phase 2a** : le FSBL affiche toujours le plein écran **ROUGE** (FB RGB565 `0xF800`), **pause ~3 s**, trace `LCD HAL ref …`, puis saut vers AppliSecure. Ce comportement n’a pas été retiré — la régression visuelle signalée concernait surtout la **suite NS** (écran noir **après** handoff Secure) ou l’absence de perception d’image une fois en AppliNonSecure.
+- **HardFault / SecureFault juste après `[NS] main() reached!`** : le premier `HAL_Init()` côté **NonSecure** appelait `HAL_MspInit()` généré par CubeMX, qui exécutait `HAL_PWREx_EnableVddIO2..5()` → accès aux registres **PWR** (`SVMCRx`, plage ~`0x0701xxxx`) alors que **PWR reste typiquement Secure (RIF)** alors que le **RCC** a été largement rendu accessible au NS via **`RCC_S->PUBCFGR*`** dans `SystemIsolation_Config()`. Résultat : **SecureFault** (ex. `SFSR=0x48` avec `SFARVALID` + `AUVIOL`, `SFAR`/`MMFAR` cohérents avec PWR), LEDs/chenillard jamais atteints.
+- **Correctif AppliNonSecure** (`stm32n6xx_hal_msp.c`) : **suppression** des `HAL_PWREx_EnableVddIOx()` dans `HAL_MspInit()` (déjà effectués côté AppliSecure avant le saut NS ; redondants et dangereux en NS).
+- **USART2 côté NS** : suppression de `HAL_RCCEx_PeriphCLKConfig()` dans `HAL_UART_MspInit()` — le **kernel clock USART2 (CLKP)** est déjà configuré par le **FSBL** ; évite des accès **CCIPR / `LL_RCC_SetClockSource`** depuis le NS (risque RIF / attributs même avec PUBCFGR partiel).
+- **Chenillard** : après un essai à **60 ms** (jugé « hyper accéléré »), pas remis à 150 ms mais à **~120 ms** par LED (`main.c` NS) pour un rythme lisible tout en restant plus vif que l’original 150 ms.
+- **LEDs boot AppliSecure** (jaune PE9 / rouge PH5) : délais **500 ms → 200 ms** chacun (`AppliSecure/Core/Src/main.c`, USER stage 2) — intention : même idée de **pause observable** que l’écran rouge FSBL, **plus courte** sur les GPIO LED.
+- **Documentation** : cette session est consignée ici ; message Git en anglais : *Red boot screen retained; NonSecure HAL_Init TZ fix; LED chase timing; doc*.
+
+**Dernières évolutions (session 15 du 2026-04-18) :**
+- **Fix définitif build dual-IDE (VS Code + CubeIDE)** : CubeMX ne génère PAS les règles de build pour `stm32n6xx_hal_rif.c` et `stm32n6xx_hal_ramcfg.c` dans `subdir.mk` malgré `HAL_RIF_MODULE_ENABLED` et `HAL_RAMCFG_MODULE_ENABLED` dans `hal_conf.h`. Modifier `subdir.mk` / `objects.list` manuellement fonctionnait pour VS Code mais était **écrasé à chaque build CubeIDE**. Ajouter des `<link>` dans `.project` était **ignoré** par CubeIDE (ne relit pas `.project` modifié en externe).
+- **Solution pérenne** : création de `FSBL/makefile.defs` — inclus automatiquement par `Debug/makefile` via `-include ../makefile.defs`, fichier **jamais écrasé** par CubeIDE. Contient les sources/objets/règles de build pour `hal_rif.c` et `hal_ramcfg.c` avec gardes conditionnelles (`ifeq ($(filter %filename.o,$(OBJS)),)`) pour éviter les doublons si CubeIDE les ajoute un jour. Les `.o` sont passés au linker via `USER_OBJS` (après `@"objects.list"`).
+- **Résultat** : les 3 projets compilent identiquement depuis VS Code (tasks make) ET CubeIDE (Clean+Build). FSBL=51912 bytes, AppliSecure=21156 bytes, AppliNonSecure=331948 bytes.
+- **Warnings linker GCC 14.3** (non bloquants) : « LOAD segment with RWX permissions » et « missing .note.GNU-stack section implies executable stack » — normaux sur MCU bare-metal sans MMU, liés à la toolchain GCC 14.3.1. CubeIDE les affiche comme "C/C++ Problem" mais ce sont des warnings inoffensifs.
+
+**Évolutions précédentes (session 14 du 2026-04-13, soir) :**
+- **BUG CRITIQUE TROUVÉ : PFCR pixel format erroné** (`layer->PFCR = 2U`). Sur STM32N6, l'encodage LTDC PFCR est **différent** des anciens STM32 (F4/F7/H7). Le N6 ajoute 4 formats byte-swapped (ABGR8888, RGBA8888, BGRA8888, BGR565) aux positions 1-5, décalant RGB565 de la position 2 à la position **4**. Le code écrivait `PFCR=2` = **RGBA8888** (4 bytes/pixel) au lieu de `PFCR=4` = **RGB565** (2 bytes/pixel). Le LTDC interprétait le framebuffer 16-bit comme du 32-bit → pitch incorrect + pixels potentiellement transparents → **écran noir**.
+- **Mapping PFCR N6 (confirmé via HAL `stm32n6xx_hal_ltdc.h`)** : 0=ARGB8888, 1=ABGR8888, 2=RGBA8888, 3=BGRA8888, **4=RGB565**, 5=BGR565, 6=RGB888, 7=Flexible (FPF0R/FPF1R). La description CMSIS dans `stm32n657xx.h` est **OBSOLÈTE** (montre l'ancien mapping F4 : 010=RGB565).
+- **Fix appliqué** : `layer->PFCR = 4U;` dans `AppliSecure/Core/Src/main.c` (section 7c). Ajout diagnostic `[7c] PFCR=` readback.
+- **RIMC bit 31 "DMAEN" n'existe PAS** sur STM32N6 : aucune définition `RIFSC_RIMC_ATTRx_DMAEN` dans les headers CMSIS. Le `|= (1UL<<31)` était silencieusement ignoré par le HW. Code mort supprimé.
+- **CORRECTION analyse RIMC_LTDC1=0x00000310** : le décodage session 12 était **faux**. Valeur correcte : **MCID=1** (bits[6:4]=001 ✅), MSEC=1 (bit8 ✅), MPRIV=1 (bit9 ✅). Le CID EST bien 1, pas 0. Les exemples BSP officiels ne positionnent pas de bit 31 non plus.
+- **Écran toujours NOIR après le fix PFCR** (testé). PFCR shadowed : readback=0 avant reload IMR, valeur finale non vérifiée après reload. BCCR vert toujours invisible. ISR=0, CPSR scanne OK. GCR=0x10002221 (BCKEN bit17=0 malgré écriture — possiblement réservé sur N6). LEDs et chenillard OK.
+- **cSpell** : ~150 warnings supprimés. `cspell.json` créé avec ~120 mots STM32/HAL + `ignorePaths` (*.md, Drivers/**, etc.). Commentaire français `Error_Handler` FSBL traduit en anglais. Commit `99ff937` poussé sur GitHub.
+- **Pistes restantes pour l'écran noir** : (1) Utiliser l'approche HAL (`HAL_LTDC_Init` + `HAL_LTDC_ConfigLayer`) au lieu de CMSIS direct — c'est ce qui fonctionne en Phase 1. (2) Le pixel clock utilise PLL1/45=26.67 MHz au lieu du BSP PLL4/2=25 MHz — tester avec PLL4. (3) Ajouter diagnostic PFCR post-reload. (4) Vérifier FPF0R/FPF1R (registres Flexible Pixel Format, doivent être 0). (5) Vérifier si BCCR nécessite un reload sur N6.
+
+**Évolutions précédentes (session 13 du 2026-04-13) :**
+- **Fix linker errors FSBL** : `HAL_RIF_RIMC_ConfigMasterAttributes`, `HAL_RIF_RISC_SetSlaveSecureAttributes`, `HAL_RAMCFG_EnableAXISRAM` étaient `undefined reference`. CubeMX n'avait pas ajouté `stm32n6xx_hal_rif.c` ni `stm32n6xx_hal_ramcfg.c` au build malgré `HAL_RIF_MODULE_ENABLED` et `HAL_RAMCFG_MODULE_ENABLED` dans `hal_conf.h`.
+- **Fix appliqué** : ajout des 2 fichiers dans `FSBL/Debug/Drivers/STM32N6xx_HAL_Driver/subdir.mk` (C_SRCS + OBJS + C_DEPS + règles de build) ET dans `FSBL/Debug/objects.list` (manquait au 1er essai → 2ème tentative réussie). FSBL compile : 51788 bytes code.
+- **Fix IntelliSense VS Code** : 124 erreurs "identifier is undefined" (`I2C_HandleTypeDef`, `UART_HandleTypeDef`, `ADC_HandleTypeDef`, etc.) dans `FSBL/Core/Src/main.c`. Cause : l'extension C/C++ ne résolvait pas la chaîne d'includes HAL (hal.h → hal_conf.h → hal_i2c.h etc.) sans les bons flags de compilation.
+- **Solution** : génération automatique de `compile_commands.json` (904 entrées, 3 sous-projets) via `make -nB` dry-run. Ajout de `"compileCommands": "${workspaceFolder}/compile_commands.json"` dans les 3 configurations de `.vscode/c_cpp_properties.json`. Ajout de `-mcmse` au FSBL config. Reset IntelliSense database → **0 erreurs**.
+- **Note** : si les Makefiles changent (ajout/suppression de fichiers), il faut regénérer `compile_commands.json` via la même commande `make -nB`.
+
+**Évolutions précédentes (session 12 du 2026-04-06, soir) :**
 - **Phase 2 TrustZone réactivée** dans AppliSecure : LTDC init complète côté Secure (section 7), CFBAR=0x34200000 (alias S), RIMC LTDC SEC+PRIV+CID1.
 - **Découverte RISAF mapping** : RISAF4/RISAF5 = ports NPU uniquement (4 GB, pas le CPU AXI). SRAM3 CPU AXI **n'a PAS de RISAF dédié** — l'accès NS est bloqué par le NoC/interconnect, pas par RISAF. RISAF4 IASR=0 confirme.
 - **Approche SEC+PRIV** : RIMC LTDC1/LTDC2 = SEC+PRIV, RISC LTDC/L1/L2 = SEC+PRIV, CFBAR = 0x34200000 (alias Secure). LTDC reste SEC (pas de bascule NSEC).
 - **Diagnostics GPIO** : PB13(CLK)=AF14 ✅, PE11(VSYNC)=AF14 ✅, PG13(DE)=OUT HIGH ✅, PQ3+PQ6=HIGH ✅.
 - **ISR=0** (aucune erreur DMA), **CPSR change** (LTDC scanne) — mais écran **toujours noir**, même le BCCR vert n'est pas visible.
-- **INDICE CLÉ : RIMC_LTDC1 = 0x00000310** → DMAEN(bit31)=0 ❌, CID=0 au lieu de 1 ❌. Le `|= (1UL<<31)` et le CID=1 HAL ne persistent pas dans le registre. **Piste prioritaire pour la prochaine session.**
+- **RIMC_LTDC1 = 0x00000310** → initialement analysé comme DMAEN=0/CID=0 (session 12). **Corrigé session 14** : décodage correct = MCID=1(bits[6:4]=001 ✅), MSEC=1(bit8 ✅), MPRIV=1(bit9 ✅). Le bit 31 « DMAEN » n'existe pas dans le registre RIMC_ATTRx sur STM32N6. Code `|= (1UL<<31)` supprimé.
 
 **Évolutions précédentes (session 11 du 2026-04-06) :**
 - **CubeIDE 2.1.1 découvert** : installé dans `C:\ST\STM32CubeIDE_1.13.0\` (nom de dossier trompeur, confirmé via `stm32cubeide.ini`). Contient GCC 14.3.1, GDB server 7.13.0, CubeProgrammer v2.22.0.
@@ -53,7 +85,7 @@ Ce document centralise toute la connaissance acquise sur le projet. Il permet à
 |--------|------|------|
 | **first_FSBL** | **ACTIF — LCD fonctionnel** | Init horloges (PLL1 1200 MHz + PLL4 600 MHz), GPIO, Security (RIMC+RISC), SRAM3/4, LTDC 25 MHz, HAL_LTDC_Init, Layer RGB565, FB RED, LED blink |
 | **first_AppliSecure** | **ACTIF — Phase 2 en cours** | Config TrustZone + LTDC init complète (section 7), RIMC/RISC SEC+PRIV, CFBAR=0x34200000 (S alias). Écran noir — RIMC DMAEN/CID suspects |
-| **first_AppliNonSecure** | **ACTIF — chenillard + diagnostic** | LEDs chenillard, USART2 traces, lecture registres LTDC (retournent 0 car LTDC=SEC) |
+| **first_AppliNonSecure** | **ACTIF — chenillard + diagnostic** | Après fix MSP NS : `HAL_Init` OK, LEDs chenillard (~120 ms/LED), USART2, NSC `SECURE_LtdcFbFillRgb565` si `NS_DIAG_NO_LVGL` ; écran peut rester noir selon phase Secure (voir §5) |
 
 ### Boot FSBL (Phase 1)
 
@@ -91,21 +123,22 @@ STM32_Programmer_CLI -c port=SWD sn=<SN> mode=HotPlug -s
 
 ### Architecture TrustZone Phase 2 (en cours — session 12)
 
-La chaîne FSBL → AppliSecure → AppliNonSecure fonctionne pour les LEDs et USART2. L'init LTDC complète est faite côté Secure dans AppliSecure (section 7, registres CMSIS via alias `_S`). Le LTDC reste SEC+PRIV (pas de bascule NSEC). L'écran reste **noir** malgré tous les registres apparemment corrects. Indice : RIMC_LTDC1 readback montre DMAEN=0 et CID=0 (voir §5.1).
+La chaîne FSBL → AppliSecure → AppliNonSecure fonctionne pour les **LEDs + USART2 + chenillard** une fois le fault NS corrigé (session 16). L'init LTDC complète est faite côté Secure dans AppliSecure (section 7, registres CMSIS via alias `_S`). Le LTDC reste SEC+PRIV (pas de bascule NSEC). L'écran reste **noir** en Phase 2 sur le chemin AppliSecure (voir §5.1 ; **le rouge FSBL Phase 2a reste OK**).
 
 ---
 
 ## 2. TrustZone / RIF — Configuration de sécurité
 
-### 2.1 Phase 1 actuelle : FSBL Secure-only (`FSBL/Core/Src/main.c`)
+### 2.1 Phase 2a actuelle : FSBL boot chain (`FSBL/Core/Src/main.c`)
 
-En Phase 1, toute la config sécurité est dans le FSBL, via les API HAL :
+Le FSBL fait maintenant un boot chain Phase 2a (init + jump to AppliSecure) :
 
-- **RIMC** (Master attributes) : `HAL_RIF_RIMC_ConfigMasterAttributes` pour LTDC1 et LTDC2 = CID1 + SEC + PRIV
-- **RISC** (Slave attributes) : `HAL_RIF_RISC_SetSlaveSecureAttributes` pour LTDC, LTDC_L1, LTDC_L2 = SEC + PRIV
-- **SRAM3+SRAM4** : `HAL_RAMCFG_EnableAXISRAM` (sort du shutdown, active les clocks)
-- **Pixel clock** : IC16 = PLL4 (600 MHz) / 24 = 25 MHz via `HAL_RCCEx_PeriphCLKConfig`
-- **LTDC** : `HAL_LTDC_Init` + `HAL_LTDC_ConfigLayer` (tout via HAL, pas CMSIS direct)
+- **LED VERTE** (PD0) : allumée CMSIS direct avant `HAL_Init`, puis réinit HAL
+- **USART2** : PD5 AF7, 115200, TX-only pour traces debug
+- **Security_Config()** : `HAL_RIF_RIMC_ConfigMasterAttributes` (LTDC1/LTDC2 = CID1+SEC+PRIV), `HAL_RIF_RISC_SetSlaveSecureAttributes` (LTDC/L1/L2 = SEC+PRIV)
+- **SRAM_Enable()** : `HAL_RAMCFG_EnableAXISRAM` pour SRAM2+SRAM3+SRAM4 (AXI)
+- **Jump_To_AppliSecure()** : lit MSP+Reset_Handler à 0x34000400, valide, positionne VTOR+MSP, saute
+- **Note build** : `stm32n6xx_hal_rif.c` et `stm32n6xx_hal_ramcfg.c` ajoutés manuellement dans subdir.mk et objects.list (session 13 — CubeMX ne les avait pas inclus)
 
 ### 2.2 Phase 2 (EN COURS — session 12) : AppliSecure + AppliNonSecure
 
@@ -113,7 +146,7 @@ Le code TrustZone split est **actif** dans `AppliSecure/Core/Src/main.c`. La cha
 
 **Config RIF (USER CODE RIF_Init 2)** :
 - **RISC (section 1)** : USART2 = NSEC+NPRIV. **LTDC/LTDCL1/LTDCL2 = SEC+PRIV** (changé session 12, avant : NSEC+NPRIV)
-- **RIMC (section 2)** : LTDC1/LTDC2 = CID1 + **SEC+PRIV** (changé session 12, avant : NSEC+NPRIV). Bit 31 DMAEN forcé via `RIFSC->RIMC_ATTRx[...] |= (1UL << 31)`. **ATTENTION** : readback montre `RIMC_LTDC1=0x00000310` → DMAEN(bit31)=0, CID=0 au lieu de 1. Le HAL ou le HW ne retient pas ces valeurs.
+- **RIMC (section 2)** : LTDC1/LTDC2 = CID1 + **SEC+PRIV** (session 12). Ancienne tentative « bit 31 DMAEN » : **supprimée session 14** — ce bit **n’existe pas** dans `RIMC_ATTRx` sur STM32N6. Readback `RIMC_LTDC1=0x00000310` = **MCID=1, MSEC=1, MPRIV=1** (décodage session 14).
 - **GPIO NSEC** : toutes les broches LCD (PA15, PB4, PB13, PE1, PG0 ajoutées manuellement car CubeMX les oublie), les 5 LEDs debug (PD0, PE9, PH5, PE10, PE13), GPIOQ (PQ3, PQ6)
 - **SRAM3/4** : clocks + shutdown (retry si FSBL n'a pas pris effet)
 - **RISAF4 (section 7d1)** : Region 0 full range (0x00000000–0xFFFFFFFF), tous CIDs autorisés, NSEC. **Note** : RISAF4 = port NPU 0, pas le CPU AXI SRAM3 (voir §2.3).
@@ -144,7 +177,8 @@ Le code TrustZone split est **actif** dans `AppliSecure/Core/Src/main.c`. La cha
 - **`RCC->MEMENR` lu depuis NS** retourne 0 si les bits PUBCFGR correspondants ne sont pas positionnés. Le diagnostic `SRAM3 clock OFF` était un **faux négatif**. Ne pas se fier à `RCC_NS->MEMENR` pour vérifier les clocks mémoire depuis le monde NS.
 - **`Error_Handler()` par défaut CubeMX** contient `while(1)`. Dans un FSBL, cela **bloque toute la chaîne de boot** si un seul `MX_xxx_Init` échoue (ex. SDMMC sans carte SD). Solution : rendre `Error_Handler` non-bloquant dans le FSBL + skipper les `MX_xxx_Init` inutiles au boot.
 - **(Session 12) RISAF4 et RISAF5 = ports NPU uniquement** (existent seulement si `NPU_PRESENT` est défini). Espace d'adressage 4 GB (pas 1 MB comme RISAF2/3). **SRAM3 CPU AXI n'a PAS de RISAF dédié**. L'accès NS à SRAM3 (0x24200000) est bloqué par le **NoC/AXI interconnect**, pas par RISAF. Mapping complet : RISAF2=AXISRAM1(1MB), RISAF3=AXISRAM2(1MB), RISAF4=NPU port 0(4GB), RISAF5=NPU port 1(4GB), RISAF6=NoC(4GB), RISAF7=FLEXRAM(512KB).
-- **(Session 12) RIMC_LTDC1 readback = 0x00000310** : décodage → MSEC=1, MPRIV=1, CIDSEL=1, **MCID=0** (devrait être 1), **DMAEN(bit31)=0** (malgré `|= (1UL<<31)`). Hypothèse : le HAL écrase le registre après notre `|=`, ou le format registre diffère de l'attendu. Vérifier l'ordre d'exécution et la datasheet RIMC_ATTRx.
+- **(Session 12→14) RIMC_LTDC1 readback = 0x00000310** : **décodage CORRIGÉ** session 14 → MCID=1 (bits[6:4]=001 ✅), MSEC=1 (bit8 ✅), MPRIV=1 (bit9 ✅). L'analyse session 12 avec « CID=0 » et « DMAEN=0 » était **fausse**. Le bit 31 « DMAEN » n'existe **PAS** dans le registre `RIFSC_RIMC_ATTRx` du STM32N6 (aucune définition dans les headers CMSIS, aucun exemple BSP ne le positionne). Configuration RIMC = correcte.
+- **(Session 14) PFCR pixel format encodage N6** : l'IP LTDC du STM32N6 a un encodage PFCR **différent** des F4/F7/H7. Le registre `LTDC_LxPFCR.PF` (3 bits) supporte 7 formats prédéfinis + 1 mode flexible : 0=ARGB8888, 1=ABGR8888(NEW), 2=RGBA8888(NEW), 3=BGRA8888(NEW), 4=RGB565(DÉPLACÉ), 5=BGR565(NEW), 6=RGB888(DÉPLACÉ), 7=Flex(FPF0R/FPF1R). La description CMSIS `stm32n657xx.h` est **OBSOLÈTE** (liste l'ancien mapping). Seul le HAL (`stm32n6xx_hal_ltdc.h`) a les bonnes valeurs.
 
 ---
 
@@ -159,10 +193,10 @@ Le code TrustZone split est **actif** dans `AppliSecure/Core/Src/main.c`. La cha
 | **Secure RAM** | 0x34064000 | 624K | AppliSecure data |
 | **FSBL ROM** | 0x34180400 | 255K | FSBL |
 
-**SAU (partition_stm32n657xx.h)** :
+**SAU (`AppliSecure/Core/Inc/partition_stm32n657xx.h`)** :
 - Region 0 : NS SRAM2 (code+data) 0x24100000 – 0x241FFFFF
 - Region 1 : NS SRAM3+SRAM4 (framebuffer) 0x24200000 – 0x242DFFFF
-- Region 2 : NSC veneer 0x34001100 – 0x3400117F
+- Region 2 : **NSC** — plage **`.gnu.sgstubs` (CMSE)** 0x34000760 – 0x3400077F (obligatoire : sans cela le premier appel NSC provoque **INVEP** / faute sécurisée car les veneers SG ne sont pas en région NSC)
 - Region 3 : NS peripherals 0x40000000 – 0x4FFFFFFF
 
 **Note** : le framebuffer est en **SRAM3** (0x24200000). Il avait été temporairement déplacé en SRAM1 (session précédente) mais est revenu en SRAM3 car RISAF4 est correctement ouvert et la SAU Region 1 couvre SRAM3/4. Le code `lv_port_disp_ltdc.c` place le buffer via `__attribute__((section(".framebuffer")))` → FBRAM. Le remplissage initial (blanc) est fait par AppliSecure via pointeur volatile sur 0x24200000.
@@ -216,9 +250,10 @@ Le driver LTDC est piloté par registres CMSIS via les alias **Secure** (`LTDC_S
 
 Points clés :
 - **RCR = 0** : ne **JAMAIS** mettre **GRMSK** (bit 2). GRMSK masque le reload global (`SRCR`) → les shadow registers ne se chargent pas → registres actifs = valeurs reset (0). C'était la cause du CFBAR=0.
-- **Reload** : utiliser `LTDC_SRCR_IMR` (reload immédiat global), attendre que le HW efface le bit.
+- **Reload** : utiliser `LTDC_LxRCR_IMR` (per-layer immediate reload), attendre que le HW efface le bit.
 - **CFBLR** : `line_length = width * bytes_per_pixel + 7` (et non +3 comme les anciens STM32).
-- **Séquence** : `LEN` → `LTDCEN` → `RCR=0` → `SRCR=IMR` → attente.
+- **Séquence** : `LEN` → `LTDCEN` → `RCR=IMR` → attente.
+- **(Session 14) PFCR** : écrire **4** pour RGB565 sur N6, **PAS 2** (l'ancien mapping F4/F7 est obsolète). Voir §2.3 pour le mapping complet.
 - **Framebuffer** : rempli en blanc (`0xFFFF` RGB565) par Secure avant enable. Adresse **0x34200000** (alias Secure, changé session 12 — avant 0x24200000). Données confirmées : `FB@S[0]=0xA5A5` (pattern test).
 - **CFBAR = 0x34200000** (alias Secure) car le DMA LTDC est configuré SEC+PRIV (session 12). L'alias NS 0x24200000 n'est pas accessible au DMA LTDC en mode SEC.
 
@@ -230,9 +265,11 @@ Points clés :
 
 **Phase 1 (FSBL-only)** : l'écran affiche du ROUGE (RGB565 0xF800). Confirmé par trace USART et visuellement. ✅
 
-**Phase 2 (TrustZone, session 12)** : écran **NOIR** ❌. L'init LTDC est faite côté Secure dans AppliSecure (section 7). Tous les registres semblent corrects (GCR, CFBAR, CR, SRCR), ISR=0 (pas d'erreur DMA), CPSR change (LTDC scanne). Même le BCCR vert (couleur de fond, pas de DMA nécessaire) n'est **pas visible**. GPIO vérifiés OK (PB13/PE11 = AF14, PG13/PQ3/PQ6 = OUTPUT HIGH).
+**Phase 2 (TrustZone, session 12→14)** : écran **NOIR** ❌. L'init LTDC est faite côté Secure dans AppliSecure (section 7). ISR=0 (pas d'erreur DMA), CPSR change (LTDC scanne). BCCR vert (pas de DMA) n'est **pas visible**. GPIO vérifiés OK.
 
-**Indice clé non résolu** : `RIMC_LTDC1 = 0x00000310` → DMAEN(bit31)=0, CID=0 (attendu : DMAEN=1, CID=1). Le code fait `HAL_RIF_RIMC_ConfigMasterAttributes(LTDC1, {CID1, SEC+PRIV})` puis `|= (1UL<<31)`, mais le readback ne reflète pas ces valeurs. Piste prioritaire pour la prochaine session.
+**Bug trouvé session 14** : `PFCR=2` au lieu de `PFCR=4` pour RGB565 (encodage N6 différent des anciens STM32). Fix appliqué, **écran toujours noir**. RIMC_LTDC1=0x00000310 = correct (CID=1, SEC, PRIV — l'analyse session 12 « CID=0 » était fausse). Le bit 31 « DMAEN » n'existe pas sur N6.
+
+**Analyse en cours** : GCR=0x10002221 montre BCKEN(bit17)=0 malgré écriture. Le BCCR vert (background, sans DMA) reste invisible → suspicion que le timing/pixel clock ne sort pas du périphérique, ou que l'init CMSIS manque des registres que HAL_LTDC_Init configure. **Recommandation forte : basculer sur HAL_LTDC_Init** (approche Phase 1 qui fonctionne).
 
 ### 5.2 Configuration LTDC fonctionnelle
 
@@ -263,6 +300,8 @@ Points clés :
 | 8 | **GRMSK (bit 2 de LxRCR)** masquait le reload → CFBAR=0 | HAL_LTDC gère le reload correctement |
 | 9 | **Boot mode flash** (BOOT1=1-2) : factory demo écrasait SRAM | **BOOT1=1-3** (dev mode) + flash externe effacée |
 | 10 | **`-s <addr>` seul** ne positionne pas MSP | **Séquence 3 étapes** : download → coreReg → start |
+| **11** | **(Session 14) PFCR=2 au lieu de 4 pour RGB565** : N6 a un encodage PFCR différent (4 nouveaux formats byte-swapped décalent les positions). PFCR=2 = RGBA8888 (4 B/px) | **Fix `PFCR=4`** (RGB565). Écran toujours noir → il y a d'autres problèmes |
+| **12** | **(Session 14) Init CMSIS vs HAL** : les écritures CMSIS directes manquent potentiellement des registres que `HAL_LTDC_Init` configure (FPF0R/FPF1R, composition, BCKEN) | **Basculer sur HAL_LTDC_Init** (à tester session 15) |
 
 ### 5.4 Historique des sessions LCD
 
@@ -280,13 +319,16 @@ Points clés :
 | 10 | LCD ROUGE confirmé (Phase 1), GDB debug fonctionnel avec CubeIDE 2.1.1 | **ROUGE ✅** |
 | 11 | CubeIDE 2.1.1 découvert, GDB server 7.13 + AP 1, pièges documentés | **ROUGE ✅** |
 | **12** | **Phase 2 TrustZone : RIMC SEC+PRIV, CFBAR=0x34200000, GPIO/RIMC diag** | **NOIR ❌** |
+| **13** | **Fix build (hal_rif.c/hal_ramcfg.c manquants) + IntelliSense (compile_commands.json)** | **Build OK ✅, IntelliSense OK ✅** |
+| **14** | **Fix PFCR 2→4 (RGB565 N6), suppression DMAEN bit 31, correction analyse RIMC, cSpell cleanup** | **NOIR ❌** (PFCR fixé mais d'autres problèmes) |
 
-**Prochain test recommandé (session 13)** :
-1. Investiguer pourquoi `RIMC_LTDC1` readback = 0x00000310 (DMAEN=0, CID=0) malgré le code
-2. Vérifier si `HAL_RIF_RIMC_ConfigMasterAttributes` écrase le bit 31 (DMAEN) qu'on force ensuite
-3. Tester en inversant l'ordre : forcer bit 31 **dans** le HAL call (via le champ adéquat), ou vérifier si un autre appel HAL réinitialise le registre
-4. Si le BCCR vert (pas de DMA) n'est pas visible, chercher si le pixel clock arrive réellement au panneau (oscilloscope sur PB13 si possible)
-5. Envisager de revenir à l'approche HAL_LTDC_Init (qui fonctionne en Phase 1) au lieu des écritures registres CMSIS directes
+**Prochain test recommandé (session 15) :**
+1. **PRIORITÉ 1 : Basculer sur `HAL_LTDC_Init` + `HAL_LTDC_ConfigLayer`** dans AppliSecure au lieu des écritures CMSIS directes. C'est l'approche qui fonctionne en Phase 1. Activer `HAL_LTDC_MODULE_ENABLED` dans `AppliSecure/Core/Inc/stm32n6xx_hal_conf.h`, ajouter `stm32n6xx_hal_ltdc.c` au build AppliSecure, et appeler le HAL depuis la section 7.
+2. **Tester avec PLL4 pixel clock** (25 MHz exact) au lieu de PLL1/45 (26.67 MHz). La Phase 1 utilise PLL4. Vérifier si PLL4 est toujours configuré après le jump FSBL→AppliSecure (RCC persiste), sinon le reconfigurer.
+3. **Ajouter diagnostic PFCR APRÈS le reload IMR** (actuellement seul le readback pré-reload est tracé, il montre 0 car c'est le registre actif pas encore mis à jour).
+4. **Vérifier FPF0R et FPF1R** (Flexible Pixel Format registers) : doivent être = 0 pour les formats prédéfinis. Si non-zéro, ils interfèrent avec PFCR.
+5. **Investiguer BCKEN (bit 17 GCR)** : la Phase 1 avec HAL_LTDC_Init ne positionne PAS BCKEN non plus (le HAL N6 ne le met pas). Vérifier si ce bit est fonctionnel ou réservé sur N6.
+6. **Alternative radicale** : si HAL échoue aussi en Phase 2, le problème est dans la chaîne de boot (quelque chose que le FSBL Phase 1 fait que la séquence FSBL→AppliSecure ne fait pas). Comparer les registres RCC/GPIO/LTDC entre les deux cas.
 
 ---
 
@@ -359,7 +401,7 @@ Toutes les broches LED sont déclarées **NSEC+NPRIV** dans AppliSecure (USER CO
 
 ## 8. Toolchains disponibles
 
-### 8.1 CubeIDE 1.11.0 (toolchain actuelle pour le build)
+### 8.1 CubeIDE 1.11.0 (ancienne toolchain — remplacée par CubeIDE 2.1.1)
 
 | Outil | Version | Chemin |
 |-------|---------|--------|
@@ -427,7 +469,7 @@ arm-none-eabi-gdb.exe --batch \
 
 ## 9. Migration IAR
 
-**Statut** : planifiée, **en attente** que la Phase 2 (TrustZone + LVGL) fonctionne. La Phase 1 LCD fonctionne sous VS Code + GCC + STM32_Programmer_CLI. Le debug GDB fonctionne avec CubeIDE 2.1.1 (GDB server 7.13), ce qui réduit l'urgence de la migration IAR.
+**Statut** : planifiée, **en attente** que la Phase 2 (TrustZone + LVGL) fonctionne. La Phase 1 LCD fonctionne sous VS Code + GCC 14.3.1 (CubeIDE 2.1.1) + STM32_Programmer_CLI. Le debug GDB fonctionne avec GDB server 7.13. IntelliSense VS Code fonctionne via `compile_commands.json`. L'urgence migration IAR est réduite.
 
 **Motivation** : certification IEC 62304 classe B (MDR 2017/745), compilateur pré-qualifié IEC 61508 SIL 3, meilleur debugger (C-SPY), support TrustZone natif.
 
@@ -450,14 +492,18 @@ Pour un nouvel assistant, lire dans cet ordre :
 
 | # | Fichier | Pourquoi |
 |---|---------|----------|
+| # | Fichier | Pourquoi |
+|---|---------|----------|
 | 1 | `ETAT_PROJET_FIRST.md` | Ce document — vue d'ensemble complète |
-| 2 | `FSBL/Core/Src/main.c` | Phase 1 LCD test (ROUGE OK), Security, SRAM, LTDC HAL, LED blink |
+| 2 | `FSBL/Core/Src/main.c` | Phase 2a boot chain : Security, SRAM, USART2, Jump_To_AppliSecure |
 | 3 | `AppliSecure/Core/Src/main.c` | **Code principal actif Phase 2** : TrustZone RIF, LTDC init Secure (section 7), GPIO/RIMC diagnostics |
 | 4 | `FSBL/Core/Inc/stm32n6xx_hal_conf.h` | Modules HAL activés (LTDC, RAMCFG, RIF) |
 | 5 | `FSBL/STM32N657X0HXQ_AXISRAM2_fsbl.ld` | Linker FSBL : ROM=0x34180400, RAM=0x341C0000 |
 | 6 | `.vscode/tasks.json` | Tâches Build + Flash (3-step sequence) |
-| 7 | `AppliNonSecure/Core/Src/main.c` | Application LVGL + chenillard LEDs + diagnostic LTDC |
-| 8 | `AppliNonSecure/GUI/lvgl_port/lv_port_disp_ltdc.c` | Driver LTDC LVGL (Phase 2) |
+| 7 | `.vscode/c_cpp_properties.json` | 3 configurations IntelliSense + `compileCommands` |
+| 8 | `compile_commands.json` | 904 entrées auto-générées via `make -nB` (FSBL+AppliSecure+AppliNonSecure) |
+| 9 | `AppliNonSecure/Core/Src/main.c` | Application LVGL + chenillard LEDs + diagnostic LTDC |
+| 10 | `AppliNonSecure/GUI/lvgl_port/lv_port_disp_ltdc.c` | Driver LTDC LVGL (Phase 2) |
 
 **Autres fichiers .md existants** (contexte historique détaillé, non indispensables si ce document est lu) :
 - `ANALYSE_PROJET_FIRST.md` — structure du projet CubeMX
